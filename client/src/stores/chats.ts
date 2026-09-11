@@ -112,59 +112,62 @@ export const setChatStatus = (
   });
 };
 
-export const fetchChats = async (sessionId: string) => {
+const inFlightChats: Record<string, Promise<void>> = {};
+const lastChatsFetchTs: Record<string, number> = {};
+
+export const fetchChats = async (sessionId: string, force = false): Promise<void> => {
+  if (!sessionId) return;
+  const now = Date.now();
+  if (!force && inFlightChats[sessionId]) {
+    return inFlightChats[sessionId];
+  }
+  if (!force && now - (lastChatsFetchTs[sessionId] ?? 0) < 2000) {
+    return;
+  }
+  lastChatsFetchTs[sessionId] = now;
   // Se já temos cache local, refresca de forma silenciosa para não
   // esconder a lista atrás do "Carregando conversas…".
   const hasCache = (useChats.getState().chatsBySession[sessionId]?.length ?? 0) > 0;
   if (!hasCache) {
     useChats.setState((s) => ({ loadingChats: { ...s.loadingChats, [sessionId]: true } }));
   }
-  try {
-    const chats = (await listChats(sessionId)) ?? [];
-    // Faz merge para não perder avatarUrl/name vindos do cache quando o
-    // backend ainda não resolveu — evita "piscar" o placeholder de letra.
-    useChats.setState((s) => {
-      const prev = s.chatsBySession[sessionId] ?? [];
-      const prevByJid = new Map(prev.map((c) => [c.chatJid, c]));
-      const merged = chats.map((c) => {
-        const old = prevByJid.get(c.chatJid);
-        if (!old) return c;
-        return {
-          ...c,
-          avatarUrl: c.avatarUrl || old.avatarUrl,
-          name: c.name || old.name,
-        };
+  const promise = (async () => {
+    try {
+      const chats = (await listChats(sessionId)) ?? [];
+      // Faz merge para não perder avatarUrl/name vindos do cache quando o
+      // backend ainda não resolveu — evita "piscar" o placeholder de letra.
+      useChats.setState((s) => {
+        const prev = s.chatsBySession[sessionId] ?? [];
+        const prevByJid = new Map(prev.map((c) => [c.chatJid, c]));
+        const merged = chats.map((c) => {
+          const old = prevByJid.get(c.chatJid);
+          if (!old) return c;
+          return {
+            ...c,
+            avatarUrl: c.avatarUrl || old.avatarUrl,
+            name: c.name || old.name,
+          };
+        });
+        return { chatsBySession: { ...s.chatsBySession, [sessionId]: merged } };
       });
-      return { chatsBySession: { ...s.chatsBySession, [sessionId]: merged } };
-    });
-    // Faz pré-carregamento das fotos para que apareçam imediatamente
-    // quando o usuário rolar a lista — sem o delay de "imagem aparecendo
-    // só depois de um tempo" relatado pelo usuário.
-    if (typeof window !== "undefined") {
-      for (const c of chats) {
-        if (c.avatarUrl) {
-          const img = new Image();
-          img.decoding = "async";
-          img.src = c.avatarUrl;
-        }
+      // Auto-retry quando a primeira chamada chega vazia logo após o login
+      // / troca de empresa: nesse momento o whatsmeow ainda pode não ter
+      // sincronizado as mensagens da sessão.
+      if (chats.length === 0 && !hasCache) {
+        scheduleEmptyRetry(sessionId);
+      } else {
+        clearEmptyRetry(sessionId);
       }
+    } catch (err) {
+      console.error("[chats] fetchChats failed", sessionId, err);
+      useChats.setState((s) => ({ chatsBySession: { ...s.chatsBySession, [sessionId]: s.chatsBySession[sessionId] ?? [] } }));
+    } finally {
+      delete inFlightChats[sessionId];
+      useChats.setState((s) => ({ loadingChats: { ...s.loadingChats, [sessionId]: false } }));
     }
-    // Auto-retry quando a primeira chamada chega vazia logo após o login
-    // / troca de empresa: nesse momento o whatsmeow ainda pode não ter
-    // sincronizado as mensagens da sessão. Antes o usuário precisava
-    // apertar F5 para ver os atendimentos aparecerem.
-    if (chats.length === 0 && !hasCache) {
-      scheduleEmptyRetry(sessionId);
-    } else {
-      clearEmptyRetry(sessionId);
-    }
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("[chats] fetchChats failed", sessionId, err);
-    useChats.setState((s) => ({ chatsBySession: { ...s.chatsBySession, [sessionId]: s.chatsBySession[sessionId] ?? [] } }));
-  } finally {
-    useChats.setState((s) => ({ loadingChats: { ...s.loadingChats, [sessionId]: false } }));
-  }
+  })();
+  inFlightChats[sessionId] = promise;
+  return promise;
 };
 
 // Retries silenciosos para a aba de atendimento abrir cheia mesmo

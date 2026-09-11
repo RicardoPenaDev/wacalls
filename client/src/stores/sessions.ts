@@ -22,17 +22,38 @@ const pickActive = (sessions: SessionInfo[], current: string | null): string | n
 };
 
 let wired = false;
-// Always re-fetch the sessions list when this is called — the SSE listener is
-// only registered once. Without the refetch, navigating back to /connections
-// after the SSE list event already fired could leave the page blank until F5,
-// because the listener has nothing new to deliver.
-export const ensureSessionsWired = (): void => {
+let inFlightSessions: Promise<void> | null = null;
+let lastSessionsFetchTs = 0;
+
+export const ensureSessionsWired = (force = false): void => {
   eventStream.connect(getClientId());
-  void listSessions()
-    .then((sessions) =>
-      useSessions.setState((s) => ({ sessions, activeId: pickActive(sessions, s.activeId) })),
-    )
-    .catch(() => {});
+  const now = Date.now();
+  if (force || (!inFlightSessions && now - lastSessionsFetchTs > 4000)) {
+    lastSessionsFetchTs = now;
+    inFlightSessions = listSessions()
+      .then((sessions) => {
+        useSessions.setState((s) => {
+          const old = s.sessions;
+          if (
+            old.length === sessions.length &&
+            old.every(
+              (o, i) =>
+                o.id === sessions[i].id &&
+                o.paired === sessions[i].paired &&
+                o.state === sessions[i].state &&
+                o.name === sessions[i].name,
+            )
+          ) {
+            return s;
+          }
+          return { sessions, activeId: pickActive(sessions, s.activeId) };
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlightSessions = null;
+      });
+  }
   if (wired) return;
   wired = true;
   eventStream.on((ev: BrokerEvent) => {

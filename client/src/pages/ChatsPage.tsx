@@ -37,12 +37,16 @@ const EMPTY_CHATS: ChatSummary[] = [];
 
 export const ChatsPage = () => {
   const { t } = useTranslation();
-  ensureSessionsWired();
-  ensureChatsWired();
+
+  useEffect(() => {
+    ensureSessionsWired();
+    ensureChatsWired();
+  }, []);
 
   const sessions = useSessions((s) => s.sessions);
   const activeId = useSessions((s) => s.activeId);
   const pairedSessions = useMemo(() => sessions.filter((s) => s.paired), [sessions]);
+  const pairedSessionIds = useMemo(() => pairedSessions.map((s) => s.id).join(","), [pairedSessions]);
   const [pickedSession, setPickedSession] = useState<string | null>(null);
   const [selectedChatSessionId, setSelectedChatSessionId] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -61,7 +65,7 @@ export const ChatsPage = () => {
     }
     const firstPaired = pairedSessions[0];
     if (firstPaired) setPickedSession(firstPaired.id);
-  }, [activeId, sessions, pickedSession, pairedSessions]);
+  }, [activeId, pickedSession, pairedSessionIds]);
 
   const sessionId =
     pickedSession ?? (pairedSessions.length > 1 ? "all" : (activeId ?? pairedSessions[0]?.id ?? null));
@@ -90,7 +94,7 @@ export const ChatsPage = () => {
     next.delete("jid");
     setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, pairedSessions]);
+  }, [searchParams, pairedSessionIds]);
 
   const activeJid = useChats((s) => {
     if (sessionId === "all") {
@@ -133,7 +137,7 @@ export const ChatsPage = () => {
     } else if (sessionId) {
       void fetchChats(sessionId);
     }
-  }, [sessionId, pairedSessions]);
+  }, [sessionId, pairedSessionIds]);
 
   // Refetch quando o usuário volta para a aba ou re-foca a janela.
   useEffect(() => {
@@ -153,7 +157,7 @@ export const ChatsPage = () => {
       window.removeEventListener("focus", refetch);
       document.removeEventListener("visibilitychange", refetch);
     };
-  }, [sessionId, pairedSessions]);
+  }, [sessionId, pairedSessionIds]);
 
   // Conversa ativa selecionada
   const activeChat = useMemo(
@@ -257,12 +261,14 @@ export const ChatsPage = () => {
           await assignChat(targetSid, c.chatJid);
           setChatStatus(targetSid, c.chatJid, "open", me?.id ?? null);
           ok += 1;
-        } catch {
+        } catch (err) {
+          console.error("[bulkAssign] falha ao aceitar chat:", c.chatJid, err);
           fail += 1;
         }
+        await new Promise((r) => setTimeout(r, 40));
       }
     };
-    await Promise.all(Array.from({ length: Math.min(6, targetedForBulk.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(3, targetedForBulk.length) }, worker));
     setBulkBusy(false);
     toast.dismiss(tId);
     if (fail === 0) {
@@ -283,9 +289,9 @@ export const ChatsPage = () => {
       );
     }
     if (sessionId === "all") {
-      pairedSessions.forEach((s) => void fetchChats(s.id));
+      pairedSessions.forEach((s) => void fetchChats(s.id, true));
     } else if (sessionId) {
-      void fetchChats(sessionId);
+      void fetchChats(sessionId, true);
     }
   };
 
@@ -313,12 +319,14 @@ export const ChatsPage = () => {
           await closeChat(targetSid, c.chatJid, "encerramento em massa");
           setChatStatus(targetSid, c.chatJid, "closed", null);
           ok += 1;
-        } catch {
+        } catch (err) {
+          console.error("[bulkClose] falha ao fechar chat:", c.chatJid, err);
           fail += 1;
         }
+        await new Promise((r) => setTimeout(r, 40));
       }
     };
-    await Promise.all(Array.from({ length: Math.min(6, targetedForBulk.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(3, targetedForBulk.length) }, worker));
     setBulkBusy(false);
     toast.dismiss(tId);
     if (fail === 0) {
@@ -338,9 +346,9 @@ export const ChatsPage = () => {
       );
     }
     if (sessionId === "all") {
-      pairedSessions.forEach((s) => void fetchChats(s.id));
+      pairedSessions.forEach((s) => void fetchChats(s.id, true));
     } else if (sessionId) {
-      void fetchChats(sessionId);
+      void fetchChats(sessionId, true);
     }
   };
 
@@ -591,6 +599,7 @@ export const ChatsPage = () => {
         open={confirmAssignAll}
         onOpenChange={setConfirmAssignAll}
         title={t("pages.chats.assignAllTitle", {
+          tab: TAB_LABEL[tab],
           defaultValue: `Aceitar todos da aba "${TAB_LABEL[tab]}"?`,
         })}
         description={t("pages.chats.assignAllDescription", {

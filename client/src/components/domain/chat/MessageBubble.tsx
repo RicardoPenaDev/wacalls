@@ -158,7 +158,7 @@ export const MessageBubble = ({ message, showSender, onForward, onEdit, onDelete
   return (
     <div className={`group/msg flex flex-col ${mine ? "items-end" : "items-start"} ${reactionChips.length > 0 ? "mb-3" : ""}`}>
       <div
-        className={`relative max-w-[78%] rounded-2xl px-3 py-1.5 text-sm shadow-sm ${
+        className={`relative max-w-[88%] sm:max-w-[78%] rounded-2xl px-3 py-1.5 text-sm shadow-sm ${
           mine ? "rounded-br-sm bg-primary text-primary-foreground" : "rounded-bl-sm bg-background"
         } ${deleted ? "opacity-80" : ""}`}
       >

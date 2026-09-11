@@ -356,8 +356,12 @@ export const ChatsPage = () => {
 
   return (
     <AppShell>
-      <div className="flex h-full min-h-0 gap-3">
-        <div className="flex w-96 shrink-0 flex-col overflow-hidden rounded-2xl border bg-card shadow-sm">
+      <div className="flex h-full min-h-0 gap-0 sm:gap-3">
+        <div
+          className={`overflow-hidden rounded-none sm:rounded-2xl border-0 sm:border bg-card shadow-sm ${
+            activeJid ? "hidden md:flex md:w-96 md:shrink-0 flex-col" : "flex w-full md:w-96 md:shrink-0 flex-col"
+          }`}
+        >
           {pairedSessions.length > 1 && (
             <div className="border-b p-2">
               <select
@@ -557,10 +561,25 @@ export const ChatsPage = () => {
             }}
           />
         </div>
-        <div className="flex min-w-0 flex-1 overflow-hidden rounded-2xl border bg-card shadow-sm">
+        <div
+          className={`min-w-0 flex-1 overflow-hidden rounded-none sm:rounded-2xl border-0 sm:border bg-card shadow-sm ${
+            activeJid ? "flex flex-col" : "hidden md:flex flex-col"
+          }`}
+        >
           <ChatView
             sessionId={effectiveSessionId}
             chatJid={activeJid}
+            onBack={() => {
+              if (effectiveSessionId) {
+                setActiveChat(effectiveSessionId, null);
+              }
+              if (sessionId) {
+                setActiveChat(sessionId, null);
+              }
+              if (sessionId === "all") {
+                setActiveChat("all", null);
+              }
+            }}
             onStatusChange={(status) => {
               if (status === "open") setTab("open");
               else if (status === "closed" || status === "waiting") setTab("waiting");

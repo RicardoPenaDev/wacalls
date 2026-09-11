@@ -345,7 +345,9 @@ const upsertMessage = (msg: ChatMessage) => {
     const chats = [...(s.chatsBySession[msg.sessionId] ?? [])];
     const idx = chats.findIndex((c) => c.chatJid === msg.chatJid);
     const prev = idx >= 0 ? chats[idx] : undefined;
-    const isActive = s.activeJidBySession[msg.sessionId] === msg.chatJid;
+    const isActive =
+      s.activeJidBySession[msg.sessionId] === msg.chatJid ||
+      s.activeJidBySession["all"] === msg.chatJid;
     let unread = prev?.unread ?? 0;
     if (!msg.fromMe && !isActive) unread += 1;
     if (msg.fromMe || isActive) unread = 0;
@@ -385,7 +387,10 @@ const upsertMessage = (msg: ChatMessage) => {
   });
   // If the message landed in the active chat, sync read state with backend.
   const state = useChats.getState();
-  if (state.activeJidBySession[msg.sessionId] === msg.chatJid && !msg.fromMe) {
+  const isCurrentlyActive =
+    state.activeJidBySession[msg.sessionId] === msg.chatJid ||
+    state.activeJidBySession["all"] === msg.chatJid;
+  if (isCurrentlyActive && !msg.fromMe) {
     void markChatReadAPI(msg.sessionId, msg.chatJid, msg.ts).catch(() => {});
   }
 };

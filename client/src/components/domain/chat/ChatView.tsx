@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { isCallRecordingEnabled } from "@/lib/call-recording-pref";
-import { CheckCheck, History, KanbanSquare, Mic, Paperclip, Phone, PhoneOff, Search, Send, Smile, UserPlus, Image as ImageIcon, FileText, Film, Contact2, Settings2, Signature, StickyNote, Workflow, Zap, Clock, X } from "lucide-react";
+import { ArrowLeft, CheckCheck, History, KanbanSquare, Mic, Paperclip, Phone, PhoneOff, Search, Send, Smile, UserPlus, Image as ImageIcon, FileText, Film, Contact2, Settings2, Signature, StickyNote, Workflow, Zap, Clock, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChats, setChatStatus } from "@/stores/chats";
 import { useAuth } from "@/stores/auth";
@@ -46,10 +46,11 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 interface Props {
   sessionId: string;
   chatJid: string | null;
+  onBack?: () => void;
   onStatusChange?: (status: "open" | "waiting" | "closed") => void;
 }
 
-export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
+export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) => {
   const { t, i18n } = useTranslation();
   const myId = useAuth((s) => s.user?.id ?? null);
   const myUser = useAuth((s) => s.user);
@@ -392,7 +393,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
   const displayName = chat?.name && chat.name.trim() !== "" ? chat.name : formatPeer(chatJid);
   const status = chat?.status ?? "open";
   const isGroup = !!chat?.isGroup || isGroupJid(chatJid);
-  const canSend = isGroup || status === "open";
+  const canSend = isGroup || status === "open" || status === "waiting";
 
   const handleSend = async () => {
     const value = text.trim();
@@ -416,6 +417,18 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
       return;
     }
     if (!canSend) return;
+
+    // Se o atendimento estiver aguardando, auto-atribui ao operador atual ao responder
+    if (!isGroup && status === "waiting") {
+      try {
+        await assignChat(sessionId, chatJid);
+        setChatStatus(sessionId, chatJid, "open", myId);
+        onStatusChange?.("open");
+      } catch (e) {
+        console.error("auto assign on send failed", e);
+      }
+    }
+
     let composed = value;
     if (replyTo) {
       const quoted = quotePreview(replyTo);
@@ -450,6 +463,15 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
   const handleFile = async (file: File | null, kind: "image" | "video" | "audio" | "document") => {
     if (!file) return;
     if (!canSend) return;
+    if (!isGroup && status === "waiting") {
+      try {
+        await assignChat(sessionId, chatJid);
+        setChatStatus(sessionId, chatJid, "open", myId);
+        onStatusChange?.("open");
+      } catch (e) {
+        console.error("auto assign on media send failed", e);
+      }
+    }
     setShowAttach(false);
     setSending(true);
     try {
@@ -464,6 +486,15 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
 
   const startRecording = async () => {
     if (!canSend) return;
+    if (!isGroup && status === "waiting") {
+      try {
+        await assignChat(sessionId, chatJid);
+        setChatStatus(sessionId, chatJid, "open", myId);
+        onStatusChange?.("open");
+      } catch (e) {
+        console.error("auto assign on audio record failed", e);
+      }
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -802,12 +833,23 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
   ].sort((a, b) => a.ts - b.ts);
   return (
     <div className="relative flex flex-1 flex-col">
-      <header className="flex items-center gap-3 border-b px-4 py-3">
+      <header className="flex items-center gap-2 sm:gap-3 border-b px-3 sm:px-4 py-2.5 sm:py-3">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
+            aria-label="Voltar para a lista de conversas"
+            title="Voltar"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setShowContactDetails(true)}
           title="Ver dados do contato"
-          className="relative grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-full bg-primary/10 text-sm font-semibold text-primary ring-offset-background transition hover:ring-2 hover:ring-primary/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          className="relative grid h-8 w-8 sm:h-9 sm:w-9 shrink-0 place-items-center overflow-hidden rounded-full bg-primary/10 text-sm font-semibold text-primary ring-offset-background transition hover:ring-2 hover:ring-primary/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         >
           {chat?.avatarUrl ? (
             <img
@@ -829,11 +871,11 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           className="min-w-0 flex-1 text-left transition hover:opacity-80"
           title="Ver dados do contato"
         >
-          <div className="flex items-center gap-1.5">
-            <span className="truncate text-sm font-semibold">{displayName}</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="truncate text-sm font-semibold max-w-[140px] sm:max-w-none">{displayName}</span>
             {sessionName && (
               <span
-                className="inline-flex max-w-[150px] shrink-0 items-center gap-1 truncate rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400"
+                className="hidden xs:inline-flex max-w-[120px] sm:max-w-[150px] shrink-0 items-center gap-1 truncate rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 sm:px-2 py-0.5 text-[9px] sm:text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400"
                 title={`Conexão WhatsApp: ${sessionName}`}
               >
                 <Send className="h-2.5 w-2.5 shrink-0" />
@@ -842,7 +884,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
             )}
             {sessionQueue && (
               <span
-                className="inline-flex max-w-[160px] shrink-0 items-center truncate rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none"
+                className="hidden sm:inline-flex max-w-[160px] shrink-0 items-center truncate rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none"
                 style={tagChipStyle(sessionQueue.color)}
                 title={`Fila da conexão: ${sessionQueue.name}`}
               >
@@ -856,7 +898,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
               return (
                 <span
                   key={chip.card.id}
-                  className="inline-flex max-w-[180px] shrink-0 items-center gap-1 truncate rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none"
+                  className="hidden md:inline-flex max-w-[180px] shrink-0 items-center gap-1 truncate rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none"
                   style={tagChipStyle(color)}
                   title={full}
                 >
@@ -876,14 +918,17 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
             </span>
           </div>
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {!isGroup && (
-            <CallButtons sessionId={sessionId} chatJid={chatJid} lidPhone={lidPhone} />
+            <div className="hidden sm:flex">
+              <CallButtons sessionId={sessionId} chatJid={chatJid} lidPhone={lidPhone} />
+            </div>
           )}
           <Button
             size="sm"
             variant="ghost"
             title={t("chat.searchTitle", { defaultValue: "Buscar em mensagens e transcrições" })}
+            className="hidden sm:inline-flex"
             onClick={() => {
               setShowSearch((v) => !v);
               if (showSearch) setSearchTerm("");
@@ -895,6 +940,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
             size="sm"
             variant="ghost"
             title="Logs do atendimento"
+            className="hidden sm:inline-flex"
             onClick={() => (showHistory ? setShowHistory(false) : void openHistory())}
           >
             <History className="h-4 w-4" />
@@ -903,6 +949,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
             size="sm"
             variant="ghost"
             title="Vincular ao Kanban"
+            className="hidden md:inline-flex"
             onClick={() => setShowKanban(true)}
           >
             <KanbanSquare className="h-4 w-4" />
@@ -912,6 +959,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
               <Button
                 size="sm"
                 variant="default"
+                className="h-8 px-2.5 sm:px-3 text-xs"
                 onClick={async () => {
                   try {
                     await assignChat(sessionId, chatJid);
@@ -924,18 +972,18 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
               >
                 <UserPlus className="mr-1 h-3.5 w-3.5" /> {t("chat.attend", { defaultValue: "Atender" })}
               </Button>
-              <Button size="sm" variant="outline" onClick={() => void confirmClose()} disabled={closing}>
+              <Button size="sm" variant="outline" className="h-8 px-2 sm:px-3 text-xs" onClick={() => void confirmClose()} disabled={closing}>
                 <CheckCheck className="mr-1 h-3.5 w-3.5" /> {t("chat.finish", { defaultValue: "Finalizar" })}
               </Button>
             </>
           )}
           {!isGroup && status === "open" && (
-            <Button size="sm" variant="outline" onClick={() => void confirmClose()} disabled={closing}>
+            <Button size="sm" variant="outline" className="h-8 px-2.5 sm:px-3 text-xs" onClick={() => void confirmClose()} disabled={closing}>
               <CheckCheck className="mr-1 h-3.5 w-3.5" /> {t("chat.finish", { defaultValue: "Finalizar" })}
             </Button>
           )}
           {isGroup && status !== "closed" && (
-            <Button size="sm" variant="outline" onClick={() => void confirmClose()} disabled={closing}>
+            <Button size="sm" variant="outline" className="h-8 px-2.5 sm:px-3 text-xs" onClick={() => void confirmClose()} disabled={closing}>
               <CheckCheck className="mr-1 h-3.5 w-3.5" /> {t("chat.finish", { defaultValue: "Finalizar" })}
             </Button>
           )}
@@ -1067,12 +1115,31 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
         </div>
       )}
       {!isGroup && status === "waiting" && (
-        <div className="border-t border-amber-400/40 bg-amber-100/40 px-3 py-2 text-center text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-          Este atendimento está <strong>aguardando</strong>. Aceite o ticket para poder enviar mensagens.
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-amber-400/40 bg-amber-100/40 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+          <span>
+            Este atendimento está <strong>aguardando</strong>.
+          </span>
+          <Button
+            size="sm"
+            type="button"
+            className="h-7 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs px-3 shadow-sm"
+            onClick={async () => {
+              try {
+                await assignChat(sessionId, chatJid);
+                setChatStatus(sessionId, chatJid, "open", myId);
+                onStatusChange?.("open");
+              } catch (e) {
+                console.error("assign chat failed", e);
+              }
+            }}
+          >
+            <UserPlus className="mr-1.5 h-3.5 w-3.5" />
+            Aceitar Atendimento
+          </Button>
         </div>
       )}
       <form
-        className="flex items-center gap-2 border-t bg-background px-3 py-2"
+        className="flex items-center gap-1.5 sm:gap-2 border-t bg-background px-2 sm:px-3 py-2"
         onSubmit={(e) => {
           e.preventDefault();
           void handleSend();
@@ -1083,7 +1150,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           type="button"
           title={noteMode ? "Mensagem privada ATIVA (clique para desativar)" : "Mensagem privada (nota interna)"}
           onClick={() => setNoteMode((v) => !v)}
-          className={`rounded-md p-2 ${noteMode ? "bg-amber-400/20 text-amber-600 dark:text-amber-300" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          className={`hidden sm:inline-flex rounded-md p-2 ${noteMode ? "bg-amber-400/20 text-amber-600 dark:text-amber-300" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
         >
           <StickyNote className="h-4 w-4" />
         </button>
@@ -1092,7 +1159,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           title="Emojis"
           onClick={() => setShowEmoji((v) => !v)}
           disabled={!canSend}
-          className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+          className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground shrink-0"
         >
           <Smile className="h-4 w-4" />
         </button>
@@ -1101,12 +1168,12 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           title="Enviar contato"
           onClick={() => { setShowAttach(false); setShowContact((v) => !v); }}
           disabled={!canSend}
-          className={`rounded-md p-2 disabled:cursor-not-allowed disabled:opacity-40 ${showContact ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          className={`hidden sm:inline-flex rounded-md p-2 disabled:cursor-not-allowed disabled:opacity-40 ${showContact ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
         >
           <Contact2 className="h-4 w-4" />
         </button>
 
-        <div className="relative">
+        <div className="relative shrink-0">
           <button
             type="button"
             title="Anexar"
@@ -1117,7 +1184,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
             <Paperclip className="h-4 w-4" />
           </button>
           {showAttach && (
-            <div className="absolute bottom-full left-0 mb-2 w-44 overflow-hidden rounded-lg border bg-popover shadow-md">
+            <div className="absolute bottom-full left-0 mb-2 w-44 overflow-hidden rounded-lg border bg-popover shadow-md z-40">
               <AttachItem icon={<ImageIcon className="h-4 w-4" />} label={t("chat.attachImage", { defaultValue: "Imagem" })} onClick={() => imgInputRef.current?.click()} />
               <AttachItem icon={<Film className="h-4 w-4" />} label={t("chat.attachVideo", { defaultValue: "Vídeo" })} onClick={() => videoInputRef.current?.click()} />
               <AttachItem icon={<FileText className="h-4 w-4" />} label={t("chat.attachDocument", { defaultValue: "Documento" })} onClick={() => docInputRef.current?.click()} />
@@ -1141,7 +1208,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           }}
           onContextMenu={(e) => { e.preventDefault(); setShowSignatureEditor((v) => !v); }}
           disabled={!canSend}
-          className={`rounded-md p-2 disabled:cursor-not-allowed disabled:opacity-40 ${signature.enabled ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          className={`hidden sm:inline-flex rounded-md p-2 disabled:cursor-not-allowed disabled:opacity-40 ${signature.enabled ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
         >
           <Signature className="h-4 w-4" />
         </button>
@@ -1149,7 +1216,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           type="button"
           title={t("chat.quickRepliesTitle", { defaultValue: "Respostas rápidas (digite / no campo)" })}
           onClick={() => setShowQuickManager(true)}
-          className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground shrink-0"
         >
           <Zap className="h-4 w-4" />
         </button>
@@ -1158,7 +1225,7 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
           title="Agendar mensagem / follow-up"
           onClick={() => setShowSchedule(true)}
           disabled={!chatJid}
-          className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          className="hidden sm:inline-flex rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Clock className="h-4 w-4" />
         </button>

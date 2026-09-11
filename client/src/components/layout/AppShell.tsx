@@ -63,6 +63,7 @@ const AppShellInner = ({ children }: { children: ReactNode }) => {
   }, []);
   const isDark = theme === "dark" || (typeof document !== "undefined" && document.documentElement.classList.contains("dark"));
   const brandLogo = (isDark ? wl?.logoDark : wl?.logoLight) || wl?.logoLight || wl?.logoDark;
+  const brandName = wl?.appName || "WaCalls";
   const userEmail = (user?.email || "").trim().toLowerCase();
   const isSuperAdmin =
     !!user &&

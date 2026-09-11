@@ -191,7 +191,9 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
   // Queue (fila) configured on the WhatsApp connection. Rendered as a small
   // colored chip beside the contact name so the operator instantly sees which
   // team/fila this conversation belongs to.
-  const sessionQueueId = useSessions((s) => s.sessions.find((x) => x.id === sessionId)?.queueId);
+  const session = useSessions((s) => s.sessions.find((x) => x.id === sessionId));
+  const sessionQueueId = session?.queueId;
+  const sessionName = session?.name;
   const [queues, setQueues] = useState<Queue[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -829,6 +831,15 @@ export const ChatView = ({ sessionId, chatJid, onStatusChange }: Props) => {
         >
           <div className="flex items-center gap-1.5">
             <span className="truncate text-sm font-semibold">{displayName}</span>
+            {sessionName && (
+              <span
+                className="inline-flex max-w-[150px] shrink-0 items-center gap-1 truncate rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400"
+                title={`Conexão WhatsApp: ${sessionName}`}
+              >
+                <Send className="h-2.5 w-2.5 shrink-0" />
+                <span className="truncate">{sessionName}</span>
+              </span>
+            )}
             {sessionQueue && (
               <span
                 className="inline-flex max-w-[160px] shrink-0 items-center truncate rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none"

@@ -49,6 +49,7 @@ export interface ChatSummary {
   unread?: number;
   lastReadTs?: number;
   avatarUrl?: string;
+  sessionId?: string;
 }
 
 export interface ChatMeta {

@@ -22,7 +22,11 @@ Chat em tempo real, filas, contatos, conexões multi-número, relatórios e auto
 ## 🌟 Funcionalidades Principais
 
 - 🔐 **Autenticação e Perfis**: Login seguro por e-mail e senha com controle de permissões e opção exclusiva para administradores alterarem suas credenciais de acesso diretamente no menu do perfil.
-- 💬 **Chat em Tempo Real**: Atendimento multi-agente, envio e recebimento de texto, áudio, imagens e documentos.
+- 💬 **Chat em Tempo Real & Conexões Unificadas**:
+  - **Todas as Conexões em 1 Chat**: Modo unificado para visualizar e atender conversas de todos os números conectados em uma única tela, com badges identificando a conexão WhatsApp de origem.
+  - **Aceitar Todos em Lote**: Botão e opção para aceitar todos os atendimentos aguardando de uma só vez.
+  - **Finalizar Todos em Lote**: Botão e opção para encerrar todos os atendimentos da fila em massa com 1 clique.
+  - Envio e recebimento multi-agente de texto, áudio, imagens e documentos.
 - 📱 **Conexões WhatsApp Multi-Dispositivo**: Pareamento rápido via QR Code baseado na biblioteca `whatsmeow`.
 - 🔀 **Construtor de Fluxos (Flow Builder)**:
   - Respostas automáticas, menus interativos e ramificações condicionais.

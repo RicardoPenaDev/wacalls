@@ -19,12 +19,13 @@ export type ChatTab = "open" | "waiting" | "group";
 
 interface Props {
   sessionId: string;
+  chats?: ChatSummary[];
   activeJid: string | null;
   tab: ChatTab;
   myId: string | null;
   unreadOnly?: boolean;
   sort?: "desc" | "asc";
-  onSelect: (jid: string) => void;
+  onSelect: (jid: string, chatSessionId?: string) => void;
   onStatusChange?: (status: "open" | "waiting" | "closed") => void;
 }
 
@@ -56,11 +57,23 @@ export const filterChats = (
     return true;
   });
 
-export const ChatList = ({ sessionId, activeJid, tab, myId, unreadOnly, sort = "desc", onSelect, onStatusChange }: Props) => {
+export const ChatList = ({
+  sessionId,
+  chats: propChats,
+  activeJid,
+  tab,
+  myId,
+  unreadOnly,
+  sort = "desc",
+  onSelect,
+  onStatusChange,
+}: Props) => {
   const { t } = useTranslation();
-  const chats = useChats((s) => s.chatsBySession[sessionId] ?? EMPTY);
-  const loading = useChats((s) => s.loadingChats[sessionId] ?? false);
-  const sessionName = useSessions((s) => s.sessions.find((x) => x.id === sessionId)?.name ?? "");
+  const sessions = useSessions((s) => s.sessions);
+  const storeChats = useChats((s) => (sessionId === "all" ? EMPTY : (s.chatsBySession[sessionId] ?? EMPTY)));
+  const chats = propChats ?? storeChats;
+  const loading = useChats((s) => (sessionId === "all" ? false : (s.loadingChats[sessionId] ?? false)));
+  const sessionName = useSessions((s) => (sessionId === "all" ? "" : (s.sessions.find((x) => x.id === sessionId)?.name ?? "")));
   const [transferFor, setTransferFor] = useState<ChatSummary | null>(null);
   const [closeFor, setCloseFor] = useState<ChatSummary | null>(null);
   const filtered = useMemo(() => {
@@ -85,20 +98,23 @@ export const ChatList = ({ sessionId, activeJid, tab, myId, unreadOnly, sort = "
   return (
     <>
       <ul className="scrollbar-thin flex-1 overflow-y-auto">
-        {filtered.map((c) => (
-          <ChatRow
-            key={c.chatJid}
-            chat={c}
-            sessionId={sessionId}
-            sessionName={sessionName}
-            active={c.chatJid === activeJid}
-            tab={tab}
-            onClick={() => onSelect(c.chatJid)}
-            onTransfer={() => setTransferFor(c)}
-            onRequestClose={() => setCloseFor(c)}
-            onStatusChange={onStatusChange}
-          />
-        ))}
+        {filtered.map((c) => {
+          const rowSid = c.sessionId || sessionId;
+          return (
+            <ChatRow
+              key={`${rowSid}:${c.chatJid}`}
+              chat={c}
+              sessionId={rowSid}
+              defaultSessionName={sessionName}
+              active={c.chatJid === activeJid}
+              tab={tab}
+              onClick={() => onSelect(c.chatJid, rowSid)}
+              onTransfer={() => setTransferFor(c)}
+              onRequestClose={() => setCloseFor(c)}
+              onStatusChange={onStatusChange}
+            />
+          );
+        })}
       </ul>
       {closeFor && (
         <CloseReasonDialog
@@ -106,10 +122,11 @@ export const ChatList = ({ sessionId, activeJid, tab, myId, unreadOnly, sort = "
           onCancel={() => setCloseFor(null)}
           onConfirm={async (reason) => {
             const target = closeFor;
+            const targetSid = target.sessionId || sessionId;
             setCloseFor(null);
             try {
-              await closeChat(sessionId, target.chatJid, reason);
-              setChatStatus(sessionId, target.chatJid, "closed", null);
+              await closeChat(targetSid, target.chatJid, reason);
+              setChatStatus(targetSid, target.chatJid, "closed", null);
               onStatusChange?.("closed");
               toast.success("Atendimento finalizado");
             } catch (err) {
@@ -122,12 +139,13 @@ export const ChatList = ({ sessionId, activeJid, tab, myId, unreadOnly, sort = "
         <TransferDialog
           open={!!transferFor}
           onOpenChange={(o) => { if (!o) setTransferFor(null); }}
-          sessionId={sessionId}
+          sessionId={transferFor.sessionId || sessionId}
           chatJid={transferFor.chatJid}
           chatName={transferFor.name?.trim() || formatPeer(transferFor.chatJid)}
           excludeUserId={useAuth.getState().user?.id ?? null}
           onTransferred={() => {
-            setChatStatus(sessionId, transferFor.chatJid, "open");
+            const targetSid = transferFor.sessionId || sessionId;
+            setChatStatus(targetSid, transferFor.chatJid, "open");
             onStatusChange?.("open");
           }}
         />
@@ -139,7 +157,7 @@ export const ChatList = ({ sessionId, activeJid, tab, myId, unreadOnly, sort = "
 interface RowProps {
   chat: ChatSummary;
   sessionId: string;
-  sessionName: string;
+  defaultSessionName: string;
   active: boolean;
   tab: ChatTab;
   onClick: () => void;
@@ -148,12 +166,20 @@ interface RowProps {
   onStatusChange?: (status: "open" | "waiting" | "closed") => void;
 }
 
-const ChatRow = ({ chat, sessionId, sessionName, active, tab, onClick, onTransfer, onRequestClose, onStatusChange }: RowProps) => {
+const ChatRow = ({ chat, sessionId, defaultSessionName, active, tab, onClick, onTransfer, onRequestClose, onStatusChange }: RowProps) => {
   const { t } = useTranslation();
   const name = chat.name && chat.name.trim() !== "" ? chat.name : formatPeer(chat.chatJid);
   const unread = chat.unread ?? 0;
   const isGroup = chat.isGroup || isGroupJid(chat.chatJid);
   const me = useAuth((s) => s.user);
+  const sessions = useSessions((s) => s.sessions);
+  const targetSessionId = chat.sessionId || sessionId;
+  const sessionName = useMemo(() => {
+    if (chat.sessionId) {
+      return sessions.find((s) => s.id === chat.sessionId)?.name || defaultSessionName;
+    }
+    return defaultSessionName;
+  }, [chat.sessionId, defaultSessionName, sessions]);
   
   const [busy, setBusy] = useState<null | "assign" | "close" | "requeue" | "transfer">(null);
   const run = async (kind: typeof busy, fn: () => Promise<void>) => {
@@ -168,8 +194,8 @@ const ChatRow = ({ chat, sessionId, sessionName, active, tab, onClick, onTransfe
     e.stopPropagation();
     void run("assign", async () => {
       try {
-        await assignChat(sessionId, chat.chatJid);
-        setChatStatus(sessionId, chat.chatJid, "open", me?.id ?? null);
+        await assignChat(targetSessionId, chat.chatJid);
+        setChatStatus(targetSessionId, chat.chatJid, "open", me?.id ?? null);
         onStatusChange?.("open");
         // Abre automaticamente o ticket recém-aceito.
         onClick();
@@ -183,8 +209,8 @@ const ChatRow = ({ chat, sessionId, sessionName, active, tab, onClick, onTransfe
     e.stopPropagation();
     void run("close", async () => {
       try {
-        await closeChat(sessionId, chat.chatJid);
-        setChatStatus(sessionId, chat.chatJid, "closed", null);
+        await closeChat(targetSessionId, chat.chatJid);
+        setChatStatus(targetSessionId, chat.chatJid, "closed", null);
         onStatusChange?.("closed");
         toast.success(t("chat.closedToast", { defaultValue: "Atendimento finalizado" }));
       } catch (err) {
@@ -196,8 +222,8 @@ const ChatRow = ({ chat, sessionId, sessionName, active, tab, onClick, onTransfe
     e.stopPropagation();
     void run("requeue", async () => {
       try {
-        await requeueChat(sessionId, chat.chatJid);
-        setChatStatus(sessionId, chat.chatJid, "waiting", null);
+        await requeueChat(targetSessionId, chat.chatJid);
+        setChatStatus(targetSessionId, chat.chatJid, "waiting", null);
         onStatusChange?.("waiting");
         toast.success(t("chat.requeuedToast", { defaultValue: "Devolvido para a fila" }));
       } catch (err) {

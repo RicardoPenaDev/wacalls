@@ -28,7 +28,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
-import { closeChat } from "@/services/chats";
+import { assignChat, closeChat } from "@/services/chats";
 import { NewChatDialog } from "@/components/domain/chat/NewChatDialog";
 
 type Tab = "open" | "waiting" | "group";
@@ -42,81 +42,110 @@ export const ChatsPage = () => {
 
   const sessions = useSessions((s) => s.sessions);
   const activeId = useSessions((s) => s.activeId);
-  const [pickedSession, setPickedSession] = useState<string | null>(activeId);
+  const pairedSessions = useMemo(() => sessions.filter((s) => s.paired), [sessions]);
+  const [pickedSession, setPickedSession] = useState<string | null>(null);
+  const [selectedChatSessionId, setSelectedChatSessionId] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Hidrata pickedSession quando a store de sessões resolve depois do primeiro
-  // render (acontece em F5: na primeira renderização activeId ainda é null e
-  // a tela ficava presa no estado "Pareie uma sessão...").
+  // Hidrata pickedSession: se houver mais de uma conexão pareada, inicia em "all"
+  // para visualização unificada de todos os atendimentos; caso contrário usa a sessão ativa.
   useEffect(() => {
     if (pickedSession) return;
+    if (pairedSessions.length > 1) {
+      setPickedSession("all");
+      return;
+    }
     if (activeId) {
       setPickedSession(activeId);
       return;
     }
-    const firstPaired = sessions.find((s) => s.paired);
+    const firstPaired = pairedSessions[0];
     if (firstPaired) setPickedSession(firstPaired.id);
-  }, [activeId, sessions, pickedSession]);
+  }, [activeId, sessions, pickedSession, pairedSessions]);
 
-  // Deep-link: /chats?sid=...&jid=... abre aquela conversa. Chega da tela de
-  // Contatos e do cartao do Kanban.
-  //
-  // Duas coisas que estavam erradas aqui e faziam o cartao do Kanban "nao ir
-  // para o atendimento vinculado":
-  //  - o efeito rodava so na montagem, entao clicar num segundo cartao com a
-  //    tela de Chats ja aberta nao fazia nada;
-  //  - exigia sid E jid juntos; cartao antigo (ou criado por automacao) vem so
-  //    com o jid, e a navegacao caia no vazio.
+  const sessionId =
+    pickedSession ?? (pairedSessions.length > 1 ? "all" : (activeId ?? pairedSessions[0]?.id ?? null));
+
+  // Deep-link: /chats?sid=...&jid=... abre aquela conversa.
   useEffect(() => {
     const sid = searchParams.get("sid");
     const jid = searchParams.get("jid");
     if (!sid && !jid) return;
 
-    // Sem a conexao no link, procura em qual delas essa conversa existe.
     const chatsPorSessao = useChats.getState().chatsBySession;
-    const alvo =
+    const targetSid =
       sid ||
-      Object.keys(chatsPorSessao).find((s) => (chatsPorSessao[s] ?? []).some((c) => c.jid === jid)) ||
-      pickedSession ||
-      activeId ||
-      sessions.find((s) => s.paired)?.id ||
+      Object.keys(chatsPorSessao).find((s) => (chatsPorSessao[s] ?? []).some((c) => c.chatJid === jid)) ||
+      pairedSessions[0]?.id ||
       "";
 
-    if (alvo) setPickedSession(alvo);
-    if (alvo && jid) setActiveChat(alvo, jid);
+    if (targetSid && jid) {
+      setSelectedChatSessionId(targetSid);
+      setActiveChat(targetSid, jid);
+      setActiveChat("all", jid);
+    }
 
     const next = new URLSearchParams(searchParams);
     next.delete("sid");
     next.delete("jid");
     setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [searchParams, pairedSessions]);
 
-  const sessionId =
-    pickedSession ?? activeId ?? sessions.find((s) => s.paired)?.id ?? null;
-  const activeJid = useChats((s) => (sessionId ? s.activeJidBySession[sessionId] ?? null : null));
+  const activeJid = useChats((s) => {
+    if (sessionId === "all") {
+      return s.activeJidBySession["all"] ?? null;
+    }
+    return sessionId ? s.activeJidBySession[sessionId] ?? null : null;
+  });
+
   const [tab, setTab] = useState<Tab>("waiting");
   const me = useAuth((s) => s.user);
-  const chats = useChats((s) => (sessionId ? s.chatsBySession[sessionId] ?? EMPTY_CHATS : EMPTY_CHATS));
+  const chatsBySession = useChats((s) => s.chatsBySession);
+
+  // Lista de conversas: quando sessionId === "all", consolida todas as conexões pareadas
+  // e associa o sessionId de origem a cada card para fácil identificação.
+  const chats = useMemo(() => {
+    if (sessionId === "all") {
+      const allList: ChatSummary[] = [];
+      for (const s of pairedSessions) {
+        const sessionChats = chatsBySession[s.id] ?? EMPTY_CHATS;
+        for (const c of sessionChats) {
+          allList.push({ ...c, sessionId: s.id });
+        }
+      }
+      return allList;
+    }
+    const list = sessionId ? chatsBySession[sessionId] ?? EMPTY_CHATS : EMPTY_CHATS;
+    return list.map((c) => ({ ...c, sessionId: sessionId ?? undefined }));
+  }, [sessionId, pairedSessions, chatsBySession]);
 
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [sort, setSort] = useState<"desc" | "asc">("desc");
+  const [confirmAssignAll, setConfirmAssignAll] = useState(false);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
 
   useEffect(() => {
-    if (sessionId) void fetchChats(sessionId);
-  }, [sessionId]);
+    if (sessionId === "all") {
+      pairedSessions.forEach((s) => void fetchChats(s.id));
+    } else if (sessionId) {
+      void fetchChats(sessionId);
+    }
+  }, [sessionId, pairedSessions]);
 
   // Refetch quando o usuário volta para a aba ou re-foca a janela.
-  // Cobre o caso de "abro a página e está vazio, atualizo e aparece":
-  // se o whatsmeow demorou para sincronizar, o foco re-dispara a busca
-  // sem precisar de F5 manual.
   useEffect(() => {
     if (!sessionId) return;
     const refetch = () => {
-      if (document.visibilityState === "visible") void fetchChats(sessionId);
+      if (document.visibilityState === "visible") {
+        if (sessionId === "all") {
+          pairedSessions.forEach((s) => void fetchChats(s.id));
+        } else {
+          void fetchChats(sessionId);
+        }
+      }
     };
     window.addEventListener("focus", refetch);
     document.addEventListener("visibilitychange", refetch);
@@ -124,22 +153,46 @@ export const ChatsPage = () => {
       window.removeEventListener("focus", refetch);
       document.removeEventListener("visibilitychange", refetch);
     };
-  }, [sessionId]);
+  }, [sessionId, pairedSessions]);
+
+  // Conversa ativa selecionada
+  const activeChat = useMemo(
+    () =>
+      activeJid
+        ? chats.find(
+            (c) =>
+              c.chatJid === activeJid &&
+              (!selectedChatSessionId || c.sessionId === selectedChatSessionId),
+          ) ??
+          chats.find((c) => c.chatJid === activeJid) ??
+          null
+        : null,
+    [chats, activeJid, selectedChatSessionId],
+  );
+
+  // Conexão efetiva para o ChatView (usa a conexão específica da conversa selecionada)
+  const effectiveSessionId = useMemo(() => {
+    if (sessionId !== "all" && sessionId) return sessionId;
+    if (selectedChatSessionId) return selectedChatSessionId;
+    if (activeChat?.sessionId) return activeChat.sessionId;
+    if (activeJid) {
+      for (const s of pairedSessions) {
+        if ((chatsBySession[s.id] ?? []).some((c) => c.chatJid === activeJid)) {
+          return s.id;
+        }
+      }
+    }
+    return pairedSessions[0]?.id ?? "";
+  }, [sessionId, selectedChatSessionId, activeChat, activeJid, pairedSessions, chatsBySession]);
 
   useEffect(() => {
-    if (sessionId && activeJid) {
-      void fetchMessages(sessionId, activeJid);
-      markChatAsRead(sessionId, activeJid);
+    if (effectiveSessionId && activeJid) {
+      void fetchMessages(effectiveSessionId, activeJid);
+      markChatAsRead(effectiveSessionId, activeJid);
     }
-  }, [sessionId, activeJid]);
+  }, [effectiveSessionId, activeJid]);
 
   // Follow real-time status changes of the active chat (SSE chat-meta).
-  // If another agent assigns / requeues / closes it, hop tabs automatically
-  // so the conversation stays visible without a manual refresh.
-  const activeChat = useMemo(
-    () => (activeJid ? chats.find((c) => c.chatJid === activeJid) ?? null : null),
-    [chats, activeJid],
-  );
   const activeStatus = activeChat?.status;
   const activeIsGroup = activeChat ? activeChat.isGroup || isGroupJid(activeChat.chatJid) : false;
   useEffect(() => {
@@ -150,7 +203,6 @@ export const ChatsPage = () => {
     }
     if (activeStatus === "open" && tab !== "open") setTab("open");
     else if ((activeStatus === "waiting" || activeStatus === "closed") && tab !== "waiting") setTab("waiting");
-    // tab intentionally omitted: we only react to status flips, not user tab clicks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeStatus, activeIsGroup, activeChat?.chatJid]);
 
@@ -158,9 +210,6 @@ export const ChatsPage = () => {
     const counts = { open: 0, waiting: 0, group: 0 };
     for (const c of chats) {
       const isGroup = c.isGroup || isGroupJid(c.chatJid);
-      // Count tickets (conversations) per tab, not unread messages — the unread
-      // badge already lives inside each ticket card. Grupos "fechados" não
-      // devem contar no badge, senão o número persiste após "Finalizar".
       if (isGroup) {
         const status = c.status ?? "group";
         if (status !== "closed") counts.group += 1;
@@ -172,9 +221,7 @@ export const ChatsPage = () => {
     return counts;
   }, [chats, me?.id]);
 
-  const pairedSessions = useMemo(() => sessions.filter((s) => s.paired), [sessions]);
-
-  // Conversations targeted by "Fechar todos da aba" — respects current filters.
+  // Conversas filtradas na aba atual (para ações em lote)
   const targetedForBulk = useMemo(
     () => filterChats(chats, tab, me?.id ?? null, unreadOnly),
     [chats, tab, me?.id, unreadOnly],
@@ -186,12 +233,17 @@ export const ChatsPage = () => {
     group: t("pages.chats.tabs.group"),
   };
 
-  const handleBulkClose = async () => {
-    if (!sessionId || targetedForBulk.length === 0) return;
+  // Aceitar todas as conversas aguardando de 1 vez
+  const handleBulkAssign = async () => {
+    if (targetedForBulk.length === 0) return;
     setBulkBusy(true);
     const total = targetedForBulk.length;
-    const tId = toast.loading(t("pages.chats.bulkLoading", { count: total }));
-    // Close in parallel (limited concurrency) so 99+ chats don't take minutes.
+    const tId = toast.loading(
+      t("pages.chats.bulkAssignLoading", {
+        defaultValue: "Aceitando {{count}} atendimento(s)…",
+        count: total,
+      }),
+    );
     const queue = [...targetedForBulk];
     let ok = 0;
     let fail = 0;
@@ -199,10 +251,11 @@ export const ChatsPage = () => {
       while (queue.length) {
         const c = queue.shift();
         if (!c) break;
+        const targetSid = c.sessionId || (sessionId !== "all" ? sessionId : "");
+        if (!targetSid) continue;
         try {
-          await closeChat(sessionId, c.chatJid, "encerramento em massa");
-          // Optimistic removal — the SSE chat-meta update will confirm shortly.
-          setChatStatus(sessionId, c.chatJid, "closed", null);
+          await assignChat(targetSid, c.chatJid);
+          setChatStatus(targetSid, c.chatJid, "open", me?.id ?? null);
           ok += 1;
         } catch {
           fail += 1;
@@ -212,9 +265,83 @@ export const ChatsPage = () => {
     await Promise.all(Array.from({ length: Math.min(6, targetedForBulk.length) }, worker));
     setBulkBusy(false);
     toast.dismiss(tId);
-    if (fail === 0) toast.success(t("pages.chats.bulkSuccess", { count: ok }));
-    else toast.error(t("pages.chats.bulkPartial", { ok, fail }));
-    void fetchChats(sessionId);
+    if (fail === 0) {
+      toast.success(
+        t("pages.chats.bulkAssignSuccess", {
+          defaultValue: "{{count}} atendimento(s) aceito(s) com sucesso!",
+          count: ok,
+        }),
+      );
+      setTab("open");
+    } else {
+      toast.error(
+        t("pages.chats.bulkAssignPartial", {
+          defaultValue: "Aceitos {{ok}}, falharam {{fail}}",
+          ok,
+          fail,
+        }),
+      );
+    }
+    if (sessionId === "all") {
+      pairedSessions.forEach((s) => void fetchChats(s.id));
+    } else if (sessionId) {
+      void fetchChats(sessionId);
+    }
+  };
+
+  // Finalizar todos os atendimentos da aba atual
+  const handleBulkClose = async () => {
+    if (targetedForBulk.length === 0) return;
+    setBulkBusy(true);
+    const total = targetedForBulk.length;
+    const tId = toast.loading(
+      t("pages.chats.bulkLoading", {
+        defaultValue: "Finalizando {{count}} conversa(s)…",
+        count: total,
+      }),
+    );
+    const queue = [...targetedForBulk];
+    let ok = 0;
+    let fail = 0;
+    const worker = async () => {
+      while (queue.length) {
+        const c = queue.shift();
+        if (!c) break;
+        const targetSid = c.sessionId || (sessionId !== "all" ? sessionId : "");
+        if (!targetSid) continue;
+        try {
+          await closeChat(targetSid, c.chatJid, "encerramento em massa");
+          setChatStatus(targetSid, c.chatJid, "closed", null);
+          ok += 1;
+        } catch {
+          fail += 1;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, targetedForBulk.length) }, worker));
+    setBulkBusy(false);
+    toast.dismiss(tId);
+    if (fail === 0) {
+      toast.success(
+        t("pages.chats.bulkSuccess", {
+          defaultValue: "{{count}} conversa(s) finalizada(s)",
+          count: ok,
+        }),
+      );
+    } else {
+      toast.error(
+        t("pages.chats.bulkPartial", {
+          defaultValue: "Finalizadas {{ok}}, falharam {{fail}}",
+          ok,
+          fail,
+        }),
+      );
+    }
+    if (sessionId === "all") {
+      pairedSessions.forEach((s) => void fetchChats(s.id));
+    } else if (sessionId) {
+      void fetchChats(sessionId);
+    }
   };
 
   if (!sessionId) {
@@ -234,13 +361,21 @@ export const ChatsPage = () => {
           {pairedSessions.length > 1 && (
             <div className="border-b p-2">
               <select
-                className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
-                value={sessionId}
+                className="w-full rounded-md border bg-background px-2 py-1.5 text-sm font-medium"
+                value={sessionId ?? "all"}
                 onChange={(e) => {
-                  setPickedSession(e.target.value);
-                  setActiveChat(e.target.value, null);
+                  const val = e.target.value;
+                  setPickedSession(val);
+                  setSelectedChatSessionId(val === "all" ? null : val);
+                  setActiveChat(val, null);
+                  if (val === "all") {
+                    setActiveChat("all", null);
+                  }
                 }}
               >
+                <option value="all">
+                  {t("pages.chats.allConnections", { defaultValue: "Todas as conexões" })}
+                </option>
                 {pairedSessions.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
@@ -314,17 +449,67 @@ export const ChatsPage = () => {
                   {sort === "asc" && <CheckCheck className="ml-auto h-3.5 w-3.5 text-primary" />}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
+                {tab === "waiting" && (
+                  <DropdownMenuItem
+                    disabled={bulkBusy || targetedForBulk.length === 0}
+                    onSelect={() => setConfirmAssignAll(true)}
+                    className="gap-2 text-emerald-600 dark:text-emerald-400 focus:text-emerald-600 dark:focus:text-emerald-400 font-medium cursor-pointer"
+                  >
+                    <CheckCheck className="h-4 w-4" />
+                    {t("pages.chats.bulkAssignCount", {
+                      defaultValue: "Aceitar todos ({{count}})",
+                      count: targetedForBulk.length,
+                    })}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   disabled={bulkBusy || targetedForBulk.length === 0}
                   onSelect={() => setConfirmCloseAll(true)}
-                  className="gap-2 text-destructive focus:text-destructive"
+                  className="gap-2 text-destructive focus:text-destructive font-medium cursor-pointer"
                 >
                   <XCircle className="h-4 w-4" />
-                  {t("pages.chats.bulkCount", { count: targetedForBulk.length })}
+                  {t("pages.chats.bulkCount", {
+                    count: targetedForBulk.length,
+                    defaultValue: "Finalizar todos ({{count}})",
+                  })}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
+
+          {/* Barra de Ações Rápidas em Lote (Aceitar todos / Finalizar todos) */}
+          {targetedForBulk.length > 0 && (
+            <div className="flex items-center justify-between gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs">
+              <span className="truncate text-[11px] font-medium text-muted-foreground">
+                {tab === "waiting"
+                  ? `${targetedForBulk.length} aguardando`
+                  : `${targetedForBulk.length} em atendimento`}
+              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {tab === "waiting" && (
+                  <button
+                    type="button"
+                    disabled={bulkBusy}
+                    onClick={() => setConfirmAssignAll(true)}
+                    className="inline-flex items-center gap-1 rounded-md bg-emerald-600/10 px-2 py-1 text-[11px] font-semibold text-emerald-600 transition hover:bg-emerald-600/20 dark:text-emerald-400 dark:hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    <CheckCheck className="h-3 w-3" />
+                    Aceitar todos ({targetedForBulk.length})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={bulkBusy}
+                  onClick={() => setConfirmCloseAll(true)}
+                  className="inline-flex items-center gap-1 rounded-md bg-destructive/10 px-2 py-1 text-[11px] font-semibold text-destructive transition hover:bg-destructive/20 disabled:opacity-50"
+                >
+                  <XCircle className="h-3 w-3" />
+                  Finalizar todos ({targetedForBulk.length})
+                </button>
+              </div>
+            </div>
+          )}
+
           {(unreadOnly || sort === "asc") && (
             <div className="flex items-center gap-2 border-b bg-muted/30 px-3 py-1.5 text-[11px] text-muted-foreground">
               <ListFilter className="h-3 w-3" />
@@ -347,12 +532,25 @@ export const ChatsPage = () => {
           )}
           <ChatList
             sessionId={sessionId}
+            chats={chats}
             activeJid={activeJid}
             tab={tab}
             myId={me?.id ?? null}
             unreadOnly={unreadOnly}
             sort={sort}
-            onSelect={(jid) => setActiveChat(sessionId, jid)}
+            onSelect={(jid, chatSessionId) => {
+              const targetSid =
+                chatSessionId ||
+                (sessionId === "all" ? chats.find((c) => c.chatJid === jid)?.sessionId : sessionId) ||
+                "";
+              if (targetSid) {
+                setSelectedChatSessionId(targetSid);
+                setActiveChat(targetSid, jid);
+              }
+              if (sessionId === "all") {
+                setActiveChat("all", jid);
+              }
+            }}
             onStatusChange={(status) => {
               if (status === "open") setTab("open");
               else if (status === "waiting" || status === "closed") setTab("waiting");
@@ -361,7 +559,7 @@ export const ChatsPage = () => {
         </div>
         <div className="flex min-w-0 flex-1 overflow-hidden rounded-2xl border bg-card shadow-sm">
           <ChatView
-            sessionId={sessionId}
+            sessionId={effectiveSessionId}
             chatJid={activeJid}
             onStatusChange={(status) => {
               if (status === "open") setTab("open");
@@ -371,6 +569,19 @@ export const ChatsPage = () => {
         </div>
       </div>
       <ConfirmDialog
+        open={confirmAssignAll}
+        onOpenChange={setConfirmAssignAll}
+        title={t("pages.chats.assignAllTitle", {
+          defaultValue: `Aceitar todos da aba "${TAB_LABEL[tab]}"?`,
+        })}
+        description={t("pages.chats.assignAllDescription", {
+          defaultValue: `Deseja aceitar todos os {{count}} atendimentos aguardando? Eles serão atribuídos a você e movidos para a aba Atendendo.`,
+          count: targetedForBulk.length,
+        })}
+        confirmLabel={t("pages.chats.assignAllConfirm", { defaultValue: "Aceitar todos" })}
+        onConfirm={handleBulkAssign}
+      />
+      <ConfirmDialog
         open={confirmCloseAll}
         onOpenChange={setConfirmCloseAll}
         title={t("pages.chats.closeAllTitle", { tab: TAB_LABEL[tab] })}
@@ -378,16 +589,15 @@ export const ChatsPage = () => {
           count: targetedForBulk.length,
           unreadHint: unreadOnly ? t("pages.chats.closeAllDescription_unread") : "",
         })}
-        confirmLabel={t("actions.closeAll")}
+        confirmLabel={t("actions.closeAll", { defaultValue: "Finalizar todos" })}
         destructive
         onConfirm={handleBulkClose}
       />
       <NewChatDialog
         open={newChatOpen}
         onOpenChange={setNewChatOpen}
-        sessionId={sessionId}
+        sessionId={sessionId === "all" ? (pairedSessions[0]?.id ?? "") : sessionId}
         onOpened={() => {
-          // Após criar/abrir, alterna para a aba aguardando para revelar o ticket.
           setTab("waiting");
         }}
       />

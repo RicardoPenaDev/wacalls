@@ -384,7 +384,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
 
   if (!chatJid) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+      <div className="flex h-full min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
         Selecione uma conversa para ver as mensagens.
       </div>
     );
@@ -393,7 +393,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
   const displayName = chat?.name && chat.name.trim() !== "" ? chat.name : formatPeer(chatJid);
   const status = chat?.status ?? "open";
   const isGroup = !!chat?.isGroup || isGroupJid(chatJid);
-  const canSend = isGroup || status === "open" || status === "waiting";
+  const canSend = isGroup || status === "open" || status === "waiting" || status === "closed";
 
   const handleSend = async () => {
     const value = text.trim();
@@ -418,8 +418,8 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
     }
     if (!canSend) return;
 
-    // Se o atendimento estiver aguardando, auto-atribui ao operador atual ao responder
-    if (!isGroup && status === "waiting") {
+    // Se o atendimento estiver aguardando ou finalizado, auto-atribui ao operador atual ao responder
+    if (!isGroup && (status === "waiting" || status === "closed")) {
       try {
         await assignChat(sessionId, chatJid);
         setChatStatus(sessionId, chatJid, "open", myId);
@@ -463,7 +463,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
   const handleFile = async (file: File | null, kind: "image" | "video" | "audio" | "document") => {
     if (!file) return;
     if (!canSend) return;
-    if (!isGroup && status === "waiting") {
+    if (!isGroup && (status === "waiting" || status === "closed")) {
       try {
         await assignChat(sessionId, chatJid);
         setChatStatus(sessionId, chatJid, "open", myId);
@@ -486,7 +486,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
 
   const startRecording = async () => {
     if (!canSend) return;
-    if (!isGroup && status === "waiting") {
+    if (!isGroup && (status === "waiting" || status === "closed")) {
       try {
         await assignChat(sessionId, chatJid);
         setChatStatus(sessionId, chatJid, "open", myId);
@@ -832,8 +832,8 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
     ...(search ? [] : chatEvents.map<TimelineItem>((e) => ({ kind: "evt", ts: e.ts, key: `e:${e.id}`, evt: e }))),
   ].sort((a, b) => a.ts - b.ts);
   return (
-    <div className="relative flex flex-1 flex-col">
-      <header className="flex items-center gap-2 sm:gap-3 border-b px-3 sm:px-4 py-2.5 sm:py-3">
+    <div className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden">
+      <header className="flex shrink-0 items-center gap-2 sm:gap-3 border-b px-3 sm:px-4 py-2.5 sm:py-3">
         {onBack && (
           <button
             type="button"
@@ -990,7 +990,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
         </div>
       </header>
       {showSearch && (
-        <div className="flex items-center gap-2 border-b bg-card px-4 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-b bg-card px-4 py-2">
           <Search className="h-3.5 w-3.5 text-muted-foreground" />
           <input
             autoFocus
@@ -1012,7 +1012,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
           </button>
         </div>
       )}
-      <div ref={scrollRef} className="chat-doodle-bg flex-1 overflow-y-auto px-4 py-3">
+      <div ref={scrollRef} className="chat-doodle-bg min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {timeline.length === 0 ? (
           <div className="grid h-full place-items-center text-xs text-muted-foreground">Sem mensagens ainda.</div>
         ) : (
@@ -1058,7 +1058,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
         )}
       </div>
       {showSignatureEditor && (
-        <div className="border-t bg-card px-3 py-2 text-xs">
+        <div className="shrink-0 border-t bg-card px-3 py-2 text-xs">
           <div className="mb-1 flex items-center justify-between">
             <span className="font-medium">Assinatura do atendente (esta conversa)</span>
             <button className="text-muted-foreground hover:text-foreground" onClick={() => setShowSignatureEditor(false)}>fechar</button>
@@ -1075,26 +1075,28 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
         </div>
       )}
       {showContact && (
-        <ContactForm
-          onCancel={() => setShowContact(false)}
-          onSubmit={async (name, phone) => {
-            setShowContact(false);
-            setSending(true);
-            try {
-              await sendContact(sessionId, chatJid, name, phone);
-            } finally {
-              setSending(false);
-            }
-          }}
-        />
+        <div className="shrink-0">
+          <ContactForm
+            onCancel={() => setShowContact(false)}
+            onSubmit={async (name, phone) => {
+              setShowContact(false);
+              setSending(true);
+              try {
+                await sendContact(sessionId, chatJid, name, phone);
+              } finally {
+                setSending(false);
+              }
+            }}
+          />
+        </div>
       )}
       {showEmoji && (
-        <div className="border-t bg-background p-2">
+        <div className="shrink-0 border-t bg-background p-2">
           <EmojiPicker onPick={(e) => setText((t) => t + e)} />
         </div>
       )}
       {replyTo && (
-        <div className="flex items-start gap-2 border-t bg-muted/40 px-3 py-2 text-xs">
+        <div className="flex shrink-0 items-start gap-2 border-t bg-muted/40 px-3 py-2 text-xs">
           <div className="w-1 self-stretch rounded-full bg-primary" />
           <div className="min-w-0 flex-1">
             <div className="font-medium text-primary">
@@ -1115,7 +1117,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
         </div>
       )}
       {!isGroup && status === "waiting" && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-amber-400/40 bg-amber-100/40 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-amber-400/40 bg-amber-100/40 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           <span>
             Este atendimento está <strong>aguardando</strong>.
           </span>
@@ -1138,14 +1140,38 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
           </Button>
         </div>
       )}
+      {!isGroup && status === "closed" && (
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-muted bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            Este atendimento foi <strong>finalizado</strong>. Envie uma mensagem para reabri-lo.
+          </span>
+          <Button
+            size="sm"
+            type="button"
+            variant="outline"
+            className="h-7 font-medium text-xs px-3 shadow-sm"
+            onClick={async () => {
+              try {
+                await assignChat(sessionId, chatJid);
+                setChatStatus(sessionId, chatJid, "open", myId);
+                onStatusChange?.("open");
+              } catch (e) {
+                console.error("reopen chat failed", e);
+              }
+            }}
+          >
+            <UserPlus className="mr-1.5 h-3.5 w-3.5" />
+            Reabrir Atendimento
+          </Button>
+        </div>
+      )}
       <form
-        className="flex items-center gap-1.5 sm:gap-2 border-t bg-background px-2 sm:px-3 py-2"
+        className="flex shrink-0 items-center gap-1.5 sm:gap-2 border-t bg-background px-2 sm:px-3 py-2"
         onSubmit={(e) => {
           e.preventDefault();
           void handleSend();
         }}
       >
-        {(() => { return null; })()}
         <button
           type="button"
           title={noteMode ? "Mensagem privada ATIVA (clique para desativar)" : "Mensagem privada (nota interna)"}

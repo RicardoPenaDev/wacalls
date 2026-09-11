@@ -366,7 +366,7 @@ export const ChatsPage = () => {
     <AppShell>
       <div className="flex h-full min-h-0 gap-0 sm:gap-3">
         <div
-          className={`overflow-hidden rounded-none sm:rounded-2xl border-0 sm:border bg-card shadow-sm ${
+          className={`h-full min-h-0 overflow-hidden rounded-none sm:rounded-2xl border-0 sm:border bg-card shadow-sm ${
             activeJid ? "hidden md:flex md:w-96 md:shrink-0 flex-col" : "flex w-full md:w-96 md:shrink-0 flex-col"
           }`}
         >
@@ -570,7 +570,7 @@ export const ChatsPage = () => {
           />
         </div>
         <div
-          className={`min-w-0 flex-1 overflow-hidden rounded-none sm:rounded-2xl border-0 sm:border bg-card shadow-sm ${
+          className={`h-full min-h-0 min-w-0 flex-1 overflow-hidden rounded-none sm:rounded-2xl border-0 sm:border bg-card shadow-sm ${
             activeJid ? "flex flex-col" : "hidden md:flex flex-col"
           }`}
         >

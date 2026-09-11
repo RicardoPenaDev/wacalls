@@ -71,7 +71,12 @@ export const RequireAuth = ({ children, adminOnly = false }: { children: ReactNo
   if (!user) {
     return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   }
-  const isSuperAdmin = user.email.trim().toLowerCase() === "ricardo@gmail.com" || user.email.trim().toLowerCase() === "wacalls@admin.com";
+  const userEmail = (user.email || "").trim().toLowerCase();
+  const isSuperAdmin =
+    userEmail === "admin@admin.com" ||
+    userEmail === "admin.admin.com" ||
+    userEmail === "ricardo@gmail.com" ||
+    userEmail === "wacalls@admin.com";
 
   if (adminOnly && !user.roles.includes("admin") && !isSuperAdmin) {
     return <Navigate to="/" replace />;

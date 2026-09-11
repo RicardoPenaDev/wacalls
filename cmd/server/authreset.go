@@ -131,7 +131,7 @@ func (s *server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": ErrResetTokenInvalid.Error()})
 		return
 	}
-	if len(body.NewPassword) < 8 {
+	if len(body.NewPassword) < 4 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": ErrWeakPassword.Error()})
 		return
 	}

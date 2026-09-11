@@ -699,6 +699,10 @@ func (s *server) handleUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
+	if body.Current == "" && (u == nil || !u.IsAdmin()) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "senha atual obrigatória"})
+		return
+	}
 	if err := s.auth.UpdatePassword(r.Context(), u.ID, body.Current, body.New); err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, ErrInvalidLogin) {

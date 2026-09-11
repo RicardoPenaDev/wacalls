@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
 # 📞 WaCalls Chat
 
@@ -21,7 +21,7 @@ Chat em tempo real, filas, contatos, conexões multi-número, relatórios e auto
 
 ## 🌟 Funcionalidades Principais
 
-- 🔐 **Autenticação e Perfis**: Login seguro por e-mail e senha com controle de permissões.
+- 🔐 **Autenticação e Perfis**: Login seguro por e-mail e senha com controle de permissões e opção exclusiva para administradores alterarem suas credenciais de acesso diretamente no menu do perfil.
 - 💬 **Chat em Tempo Real**: Atendimento multi-agente, envio e recebimento de texto, áudio, imagens e documentos.
 - 📱 **Conexões WhatsApp Multi-Dispositivo**: Pareamento rápido via QR Code baseado na biblioteca `whatsmeow`.
 - 🔀 **Construtor de Fluxos (Flow Builder)**:
@@ -46,8 +46,8 @@ Chat em tempo real, filas, contatos, conexões multi-número, relatórios e auto
 
 1. **Clone o repositório:**
 ```bash
-git clone https://github.com/RicardoPenaDev/wacalls-chat.git
-cd wacalls-chat
+git clone https://github.com/RicardoPenaDev/wacalls.git
+cd wacalls
 ```
 
 2. **Inicie os contêineres:**
@@ -59,8 +59,10 @@ docker compose up -d --build
 - **URL**: [http://localhost:8090](http://localhost:8090)
 
 ### 🔑 Credenciais Padrão do Administrador
-- **E-mail**: `ricardo@gmail.com`
-- **Senha**: `Ri110490@`
+- **E-mail**: `admin@admin.com` (também aceita `admin.admin.com`)
+- **Senha**: `admin`
+
+> 💡 **Dica:** O administrador pode alterar sua senha de acesso a qualquer momento clicando em seu avatar/perfil no cabeçalho superior e selecionando **Trocar senha**.
 
 ---
 

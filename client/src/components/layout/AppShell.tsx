@@ -63,9 +63,13 @@ const AppShellInner = ({ children }: { children: ReactNode }) => {
   }, []);
   const isDark = theme === "dark" || (typeof document !== "undefined" && document.documentElement.classList.contains("dark"));
   const brandLogo = (isDark ? wl?.logoDark : wl?.logoLight) || wl?.logoLight || wl?.logoDark;
-  const brandName = wl?.appName || "VozZap";
+  const userEmail = (user?.email || "").trim().toLowerCase();
   const isSuperAdmin =
-    !!user && (user.email.trim().toLowerCase() === "ricardo@gmail.com" || user.email.trim().toLowerCase() === "wacalls@admin.com");
+    !!user &&
+    (userEmail === "admin@admin.com" ||
+      userEmail === "admin.admin.com" ||
+      userEmail === "ricardo@gmail.com" ||
+      userEmail === "wacalls@admin.com");
   const isAdmin = !!user?.roles.includes("admin") || isSuperAdmin;
   // Carrega o plano ativo assim que o shell monta para que itens não cobertos
   // pelo plano fiquem ocultos imediatamente.

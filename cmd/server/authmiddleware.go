@@ -9,7 +9,7 @@ import (
 // SuperAdminEmail identifies the SaaS owner account that has access to
 // global Settings (plans, whitelabel, options, companies management).
 // Regular admin users from other companies do NOT have this access.
-const SuperAdminEmail = "ricardo@gmail.com"
+const SuperAdminEmail = "admin@admin.com"
 
 type ctxKey int
 
@@ -51,7 +51,7 @@ func (u *currentUser) IsAdmin() bool {
 		return false
 	}
 	// Explicit permission for the Super Admin email even without the "admin" role.
-	if strings.EqualFold(u.Email, SuperAdminEmail) {
+	if strings.EqualFold(u.Email, SuperAdminEmail) || strings.EqualFold(u.Email, "admin.admin.com") || strings.EqualFold(u.Email, "ricardo@gmail.com") {
 		return true
 	}
 	return u.HasRole(RoleAdmin)
@@ -64,7 +64,7 @@ func (u *currentUser) IsSuperAdmin() bool {
 	if u == nil {
 		return false
 	}
-	return strings.EqualFold(u.Email, SuperAdminEmail)
+	return strings.EqualFold(u.Email, SuperAdminEmail) || strings.EqualFold(u.Email, "admin.admin.com") || strings.EqualFold(u.Email, "ricardo@gmail.com")
 }
 
 // TenantID returns the identifier of the tenant the user belongs to. For

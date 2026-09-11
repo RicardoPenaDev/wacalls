@@ -29,7 +29,7 @@ export const LoginPage = () => {
   const loading = useAuth((s) => s.loading);
   const login = useAuth((s) => s.login);
   const refresh = useAuth((s) => s.refresh);
-  const [email, setEmail] = useState("ricardo@gmail.com");
+  const [email, setEmail] = useState("admin@admin.com");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -59,7 +59,8 @@ export const LoginPage = () => {
     if (!email || !password) return;
     setSubmitting(true);
     try {
-      await login(email.trim(), password);
+      const cleanEmail = email.trim().toLowerCase() === "admin.admin.com" ? "admin@admin.com" : email.trim();
+      await login(cleanEmail, password);
       toast.success(t("pages.login.welcomeToast", { defaultValue: "Bem-vindo!" }));
       navigate("/chats", { replace: true });
     } catch (err) {

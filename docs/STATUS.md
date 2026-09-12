@@ -2,24 +2,27 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa ativa: nenhuma em execução — próxima pronta é `T-003` (desbloqueada).
+Tarefa ativa: nenhuma em execução — próxima pronta é `T-004`.
 
 ## Objetivo atual
 
-Baseline de VoIP recuperado e build/testes verdes. `T-003` (device_bindings store
-+ normalização de hostname) está pronta para iniciar em sessão dedicada.
+Fundação offline do domínio de suporte pronta: store `device_bindings` +
+normalização/parse/match de hostname, com testes. Próximo slice é `T-004`
+(clientes `internal/glpi` e `internal/tactical` com mocks).
 
 ## Concluído recentemente
 
 - `T-001` — inventário/baseline confirmado no código.
 - `T-002` — plano técnico do slice (modelos, endpoints, clientes `internal/`,
   flags, idempotência, falhas, mapa de arquivos). Decisões D-013/D-014.
-- `T-B001` — **concluída**. Pacote `internal/voip/media` recuperado do backup
-  `D:/fabrica/WaCalls/recovery/wacalls-chat-backup-completo.zip` e **versionado**
-  (84 arquivos, com `mlow/` e `testdata/`). Causa-raiz corrigida: `.gitignore`
-  linha 20 passou de `media/` (engolia o pacote-fonte em qualquer profundidade)
-  para `/media/` (ancorado à raiz — só uploads/gravações em runtime). Commit
-  `fe416df`.
+- `T-B001` — **concluída**. Pacote `internal/voip/media` recuperado do backup e
+  versionado (84 arquivos); `.gitignore` linha 20 `media/` → `/media/`. Commit
+  `fe416df` (publicado como `f720b0b` após rebase).
+- `T-003` — **concluída**. `cmd/server/hostname.go` (funções puras
+  `normalizeHostname`/`parseHostname`/`hostnamesMatch`) e
+  `cmd/server/devicebindingstore.go` (store `device_bindings`: `Upsert`
+  idempotente por `(tenant_id, hostname_normalized)`, `Get`, `FindByHostname`,
+  `Search`), com testes SQLite. Sem rotas, integrações externas ou client.
 
 ## Em andamento
 
@@ -27,30 +30,40 @@ Baseline de VoIP recuperado e build/testes verdes. `T-003` (device_bindings stor
 
 ## Próxima tarefa pronta
 
-**`T-003 — device_bindings store + normalização de hostname`**
-(`docs/tasks/T-003-DEVICE-BINDINGS-STORE.md`). Desbloqueada: `cmd/server` volta a
-compilar e testar. É uma tarefa offline (SQLite em memória; sem GLPI/Tactical,
-WhatsApp ou client). Sequência da Fase 1: T-003 → T-004 → T-005 → T-006 → T-007
-(detalhe em `T-002`).
+**`T-004 — clientes internal/glpi + internal/tactical`** com mocks/testes
+(`httptest`): `CreateTicket`/`GetTicket`/`FindComputerByName` (GLPI, create/get)
+e `GetAgentStatus`/`SearchAgents` (Tactical, somente leitura). Erros tipados
+`ErrUnavailable`/`ErrNotFound`/`ErrAuth`; base URL/token via env `WACALLS_*`.
+Sequência da Fase 1: T-003 → **T-004** → T-005 → T-006 → T-007 (ver `T-002`).
+
+## Decisões e limitações da T-003
+
+- Store exige `tenant_id` não-vazio (`ErrMissingTenant`) em `Upsert`,
+  `FindByHostname` e `Search` — isolamento por empresa (D-009/D-013). `Get` é
+  por `id` global.
+- `Upsert` **enriquece** atomicamente: valor não-vazio vence, vazio nunca limpa
+  um id gravado; `id`/`created_at` preservados no conflito. `match_status`:
+  inserção vazia → `pending`; atualização vazia → **mantém** o status atual;
+  valor explícito (incl. `pending`) é aplicado. Validado contra o conjunto
+  `pending|matched|conflict|missing_glpi|missing_tactical|disabled`.
+- Erros distinguíveis: `ErrDeviceBindingNotFound`, `ErrInvalidHostname`,
+  `ErrMissingTenant`, `ErrDeviceBindingConflict` (id reusado com outra chave),
+  `ErrInvalidMatchStatus` (status fora do conjunto documentado).
+- **Deferido** (D-013): detectar duplicidade real de origem e marcar
+  `match_status='conflict'` é do sync (T-004+), não do store.
 
 ## Bloqueios
 
-- Nenhum bloqueio de build (T-B001 resolvida).
+- Nenhum bloqueio de build.
 - `conversation_id` (Fase 4A) é pré-requisito do portal (Fase 4B), não do MVP.
 
-## Sincronização com origin/main (verificado 2026-09-12, pós-`git fetch`)
+## Sincronização com origin/main (verificado 2026-09-12)
 
-- Remote: `https://github.com/RicardoPenaDev/wacalls.git` (repo `wacalls`).
-- Branch `main`; árvore de trabalho **limpa**; **sem rebase em andamento**.
-- **Divergente: ahead 2, behind 1.**
-  - Locais, ainda não enviados: `fe416df` (restore media) e `028b887`
-    (docs: track project documentation).
-  - Remoto, ainda não integrado: `d11a57b docs: adiciona instrucoes de backup e
-    restauracao` — adiciona `README-BACKUP.txt` (**preservado** no `origin/main`;
-    ausente localmente só porque o commit ainda não foi integrado, sem perda).
-- **Push pendente e não autorizado.** Integrar `d11a57b` antes de enviar (rebase
-  ou merge — decisão do mantenedor; sem force-push, sem `reset --hard`).
-- `gh auth status`: token **inválido** — re-login necessário antes de push/PR.
+- Remote `https://github.com/RicardoPenaDev/wacalls.git`; branch `main`.
+- `origin/main` = `37a1953`, sincronizado após rebase; `README-BACKUP.txt`
+  presente. Recuperação do baseline VoIP e docs já **publicadas**.
+- Commit local **novo** desta sessão: `feat(support): add device binding store
+  and hostname normalization` — **não enviado** (push aguarda autorização).
 
 ## Ambiente e comandos de validação
 

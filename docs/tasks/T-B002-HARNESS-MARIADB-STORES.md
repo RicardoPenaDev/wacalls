@@ -1,8 +1,8 @@
 # T-B002 — Harness MariaDB descartável para stores
 
 Data: 2026-09-12
-Estado: especificada; não implementada
-Bloqueia: revisão final e implementação da T-005
+Estado: concluída
+Desbloqueia: revisão final do contrato da T-005
 
 ## Objetivo
 
@@ -128,3 +128,19 @@ T-005 — implementar support_requests, eventos, API e wiring
 ```
 
 T-005 permanece bloqueada até todos os critérios desta tarefa passarem.
+
+## Evidência de validação (2026-09-12)
+
+- `bash scripts/test-store-contracts.sh all` executado com sucesso no macOS:
+  - SQLite: schema idempotente, tx commit, unique constraint composta, duplicate conflict detectado por `IsUniqueViolation`, CAS com RowsAffected (1 winner, 0 loser), rollback integral e concorrência com 8 conexões (1 winner, 7 losers) aprovados (`ok wacalls/internal/testdb 0.300s`);
+  - MariaDB: container descartável `mariadb:11.4` iniciado em porta efêmera loopback (`127.0.0.1`), readiness check aprovado, mesma suíte de contrato executada e aprovada (`ok wacalls/internal/testdb 0.251s`).
+- Prova de cleanup após sucesso: `docker ps -a`, `docker volume ls` e `docker network ls` com filtro `wacalls-store-contract-` confirmaram zero recursos restantes.
+- Prova de cleanup após falha: execução com `WACALLS_TEST_SIMULATE_FAILURE=true` forçou erro durante os testes do MariaDB; trap executou `docker compose down -v --remove-orphans`; script encerrou com exit code 1 e verificação comprovou remoção total de container, volume e network.
+- `pwsh -NoProfile -File .\scripts\test-store-contracts.ps1 -Backend sqlite` executado no Windows:
+  - Parser AST validado sem erros de sintaxe;
+  - Modo SQLite aprovado (`ok wacalls/internal/testdb 0.635s`);
+  - Modo MariaDB do PowerShell não executado porque Docker não está instalado no Windows;
+  - MariaDB 11.4 já foi previamente validado e aprovado no macOS usando o runner Bash.
+- `go test ./internal/testdb/... -count=10` → 100% aprovado.
+- `go build ./...` e `go test ./...` → 100% aprovados.
+- Nenhuma credencial gravada em arquivo, commit ou log.

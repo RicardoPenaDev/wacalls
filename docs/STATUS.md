@@ -2,17 +2,16 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa atual: `T-B002` — especificada; implementação não iniciada.
-`T-005` permanece bloqueada por T-B002. Implementação e push não autorizados.
+Tarefa atual: `T-B002` — concluída. T-005 pronta para revisão final de contrato (implementação não iniciada).
+`T-005` permanece não iniciada; implementação e push não autorizados.
 
 ## Objetivo imediato
 
-Implementar e validar a infraestrutura de teste descrita em
-`docs/tasks/T-B002-HARNESS-MARIADB-STORES.md`. Depois fazer a revisão final do
-contrato T-005 e somente então iniciar sua implementação.
+Fazer a revisão final da especificação `docs/tasks/T-005-SUPPORT-REQUESTS-API-WIRING.md`
+e aguardar autorização antes de iniciar qualquer código runtime ou push.
 
 ```text
-T-B002 → revisão final T-005 → implementação T-005
+revisão final T-005 → autorização explícita → implementação T-005
 ```
 
 ## Concluído
@@ -21,17 +20,14 @@ T-B002 → revisão final T-005 → implementação T-005
 - `T-002` — plano técnico do slice; decisões D-013/D-014.
 - `T-B001` — pacote `internal/voip/media` recuperado e versionado.
 - `T-003` — normalização de hostname e store `device_bindings`, com SQLite.
-- `T-004` — clientes `internal/glpi` e `internal/tactical`, testes offline,
-  validação de path, limites, redirects e concorrência OAuth.
-- Correção documental T-005: contrato de retry, autorização, recuperação de
-  órfão, dependência T-B002 e decisão D-017 registrados. Nenhum código runtime,
-  SQL, frontend, Docker ou CI foi implementado nesta correção.
+- `T-004` — clientes `internal/glpi` e `internal/tactical`, testes offline.
+- `chore` — `.gitattributes` multiplataforma com política explícita de EOL.
+- `T-B002` — harness MariaDB descartável (`test/mariadb/compose.yml`, `internal/testdb`, `scripts/test-store-contracts.{sh,ps1}`); validado 100% em SQLite (PowerShell Windows e Bash macOS) e MariaDB 11.4 (Bash macOS); cleanups de sucesso e falha comprovados.
 
 ## Ainda falta
 
-- Implementar e validar T-B002; nenhum artefato executável do harness existe.
-- Fazer a revisão final do contrato T-005 após o aceite local/CI da T-B002.
-- Implementar T-005 somente após essa revisão e autorização explícita.
+- Fazer a revisão final do contrato T-005 após o aceite da T-B002.
+- Implementar T-005 somente após autorização explícita.
 
 ## Contratos fechados para T-005
 
@@ -71,10 +67,10 @@ T-B002 → revisão final T-005 → implementação T-005
 
 ## Bloqueios
 
-- T-005: bloqueada por ausência de harness MariaDB automatizado.
 - Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; T-005 mantém
   contexto textual.
 - `conversation_id`: fora do MVP; bloqueia somente o portal futuro.
+- T-005: implementação bloqueada até autorização explícita.
 
 ## Escopo da T-B002
 
@@ -86,28 +82,25 @@ T-B002 → revisão final T-005 → implementação T-005
 
 ## Validação registrada
 
-- Checkpoint documental: `git diff --check` → **OK**.
-- Última validação de código, na T-004: `gofmt -l` sem saída;
-  `go vet ./internal/glpi/... ./internal/tactical/...` → **OK**;
-  testes dos dois pacotes com `-count=20` → **OK**;
-  `go build ./...` e `go test ./...` → **OK**.
+- T-B002: `gofmt -l` limpo; `go vet ./internal/testdb/...` → **OK**;
+  `bash scripts/test-store-contracts.sh all` (macOS) → **100% PASS** (SQLite 0.30s, MariaDB 0.25s);
+  `pwsh -NoProfile -File .\scripts\test-store-contracts.ps1 -Backend sqlite` (Windows) → **100% PASS** (SQLite 0.64s; MariaDB não executado no Windows por Docker indisponível, já validado no macOS);
+  Cleanup após sucesso comprovado (`docker ps/volume/network ls` limpos no Mac);
+  Cleanup após falha comprovado via `WACALLS_TEST_SIMULATE_FAILURE=true` (exit code 1, zero recursos órfãos no Mac);
+  `go test ./internal/testdb/... -count=10` → **OK**;
+  `go build ./...` e `go test ./...` → **100% PASS**;
+  `git diff --check origin/main..HEAD` → **OK**.
 - Race detector não executado: CGO desabilitado e `gcc` ausente.
-- Nenhum código executável mudou desde essa validação; testes Go/frontend não
-  se aplicam ao checkpoint documental.
 
 ## Estado Git do checkpoint
 
-- Branch `main` acompanha `origin/main` com um commit documental local ainda não
-  publicado.
-- Não há merge ou rebase pendente.
-- Working tree limpa após o amend; nenhum arquivo não commitado.
+- Branch `main` à frente de `origin/main` pelo commit da T-B002 (aguardando push).
+- Nenhum merge ou rebase pendente.
 - Nenhum push realizado.
 
 ## Próximo passo
 
-Implementar T-B002 exatamente pela task. Após aceite local e CI, revisar o
-contrato T-005, então pedir autorização separada antes de qualquer código T-005
-ou push.
+Revisão final da especificação T-005 (`docs/tasks/T-005-SUPPORT-REQUESTS-API-WIRING.md`) e aguardar autorização antes de qualquer código T-005 ou push.
 
 ## Ambiente preservado
 

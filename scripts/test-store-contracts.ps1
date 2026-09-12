@@ -20,6 +20,21 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 $ComposeFile = Join-Path $RepoRoot "test/mariadb/compose.yml"
 
+if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+    $candidateToolchain = Join-Path (Split-Path -Parent $RepoRoot) "toolchains\go1.26.4\bin"
+    if (Test-Path $candidateToolchain) {
+        $env:PATH = "$candidateToolchain;$env:PATH"
+    }
+}
+
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    $dockerBin = "C:\Program Files\Docker\Docker\resources\bin"
+    if (Test-Path $dockerBin) {
+        $env:PATH = "$dockerBin;$env:PATH"
+    }
+}
+
+
 function Generate-RandomString([int]$length = 24) {
     $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     $bytes = New-Object byte[] $length
@@ -58,6 +73,10 @@ function Run-Sqlite() {
         go test ./internal/testdb/... -run '^TestStoreHarnessContract$' -count=1 -timeout=5m
         if ($LASTEXITCODE -ne 0) {
             throw "SQLite store contract test failed with exit code $LASTEXITCODE"
+        }
+        go test ./cmd/server/... -run '^TestSupportStore' -count=1 -timeout=5m
+        if ($LASTEXITCODE -ne 0) {
+            throw "SQLite support store contract test failed with exit code $LASTEXITCODE"
         }
     } finally {
         Remove-Item Env:\WACALLS_TEST_BACKEND -ErrorAction SilentlyContinue
@@ -158,6 +177,10 @@ function Run-MariaDB() {
             go test ./internal/testdb/... -run '^TestStoreHarnessContract$' -count=1 -timeout=5m
             if ($LASTEXITCODE -ne 0) {
                 throw "MariaDB store contract test failed with exit code $LASTEXITCODE"
+            }
+            go test ./cmd/server/... -run '^TestSupportStore' -count=1 -timeout=5m
+            if ($LASTEXITCODE -ne 0) {
+                throw "MariaDB support store contract test failed with exit code $LASTEXITCODE"
             }
         } finally {
             Remove-Item Env:\WACALLS_TEST_BACKEND -ErrorAction SilentlyContinue

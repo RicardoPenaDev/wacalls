@@ -2,16 +2,15 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa atual: `T-005` — especificação finalizada e aprovada; implementação não iniciada.
-`T-005` permanece não iniciada; implementação e push não autorizados.
+Tarefa atual: `T-005` — EM ANDAMENTO (fundação de persistência com FK composta aprovada em SQLite e MariaDB 11.4).
+Push e integrações de runtime ainda não autorizados.
 
 ## Objetivo imediato
 
-Aguardar autorização explícita para iniciar a implementação do código da `T-005`
-(`support_types.go`, `supportstore.go`, DDL SQLite/MariaDB e testes contratuais).
+Revisão final da fundação de persistência auditada e testada antes de iniciar `GetTicket` e o orquestrador/service.
 
 ```text
-revisão final T-005 concluída → autorização explícita → implementação T-005
+fundação T-005 (SQLite + MariaDB 11.4 100% OK) → revisão final → GetTicket/service → HTTP API/wiring
 ```
 
 ## Concluído
@@ -22,74 +21,54 @@ revisão final T-005 concluída → autorização explícita → implementação
 - `T-003` — normalização de hostname e store `device_bindings`, com SQLite.
 - `T-004` — clientes `internal/glpi` e `internal/tactical`, testes offline.
 - `chore` — `.gitattributes` multiplataforma com política explícita de EOL.
-- `T-B002` — harness MariaDB descartável (`test/mariadb/compose.yml`, `internal/testdb`, `scripts/test-store-contracts.{sh,ps1}`); validado 100% em SQLite e MariaDB 11.4; cleanups de sucesso e falha comprovados (commit `e4d3966`).
-- `T-005 (especificação)` — plano de implementação finalizado, com decisões D-017 e D-018 integradas.
+- `T-B002` — harness MariaDB descartável (`test/mariadb/compose.yml`, `internal/testdb`, `scripts/test-store-contracts.{sh,ps1}`); validado 100% em SQLite e MariaDB 11.4.
+- `T-005 (especificação)` — plano de implementação finalizado com D-017 e D-018.
+- `T-005 (fundação de persistência — integridade referencial, testes e validação multi-backend)`:
+  - `cmd/server/support_types.go` e `support_types_test.go` (tipos, enums, canonical payload v2, external_id, crypto tokens).
+  - `cmd/server/supportstore.go`:
+    - Foreign key composta formal: `support_request_events (tenant_id, support_request_id) REFERENCES support_requests (tenant_id, id) ON UPDATE RESTRICT ON DELETE RESTRICT`.
+    - Restrição de unicidade composta correspondente: `uq_support_requests_tenant_id UNIQUE (tenant_id, id)` em SQLite e MariaDB.
+    - Tipos e collations rigorosamente espelhados: `tenant_id` (`VARCHAR(128) COLLATE utf8mb4_bin`), `id`/`support_request_id` (`VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin`).
+    - Ativação obrigatória de `PRAGMA foreign_keys = ON;` na conexão SQLite.
+    - CHECK constraint de estados (`processing`, `synced`, `retryable_error`, `unknown`, `failed`) e actor_type (`user`, `system`).
+    - Geração de IDs de evento via `uuid.NewV7()` para ordenação cronológica monotônica estrita.
+    - Desempate determinístico em `ListEvents` (`ORDER BY created_at ASC, id ASC`) e `ListByConversation` (`ORDER BY created_at DESC, id DESC`).
+  - `cmd/server/supportstore_test.go`: 23 testes de contrato cobrindo rejeição de FK inexistente, rejeição de tenant divergente, bloqueio de deleção de pai com eventos, rollbacks atômicos separados em `created` e `ticket_claimed`, concorrência 10x, CAS retry e recovery de órfãos.
+  - Ambiente de teste Docker Desktop (WSL2 backend) provisionado no Windows; driver MariaDB ajustado com `clientFoundRows=true`.
+  - Validação completa nos dois backends via `scripts/test-store-contracts.ps1`:
+    - SQLite: 100% aprovado.
+    - MariaDB 11.4 descartável: 100% aprovado.
+    - 10 repetições consecutivas no MariaDB 11.4: 10/10 aprovadas.
+    - Cleanup pós-teste verificado: zero containers, volumes ou redes remanescentes.
 
 ## Ainda falta
 
-- Autorização explícita para iniciar código da T-005.
-- Implementar T-005 (store, orquestrador, API e wiring).
-
-## Contratos fechados para T-005
-
-### Criação atômica e eliminação de `new` órfão
-- `StateNew` não é estado persistente; `sync_state` grava diretamente `processing`.
-- Inserção inicial, `processing_token`, `processing_started_at` e eventos `created` + `ticket_claimed` são comitados na mesma transação atômica.
-- Elimina requests presas em `new`; qualquer interrupção de processo é coberta por `RecoverOrphanedProcessing`.
-- Enriquecimento de snapshot na Transação 2 condicionado estritamente ao `processing_token`.
-
-### Disputa concorrente no `/retry`
-- `POST /api/support/requests/{id}/retry` aceita somente `retryable_error`.
-- `unknown`, `processing`, `synced` e `failed` respondem `409 state_conflict`; nenhum segundo POST.
-- Vencedor do CAS (`RowsAffected()==1`) executa `CreateTicket` e responde `202`. Perdedor responde `409 state_conflict`.
-
-### Reconciliação segura e validação de `external_id`
-- `POST /api/support/requests/{id}/reconcile` com `outcome=synced` exige `currentUser.IsAdmin()`.
-- Rota `GET /Assistance/Ticket/{id}` confirmada no OpenAPI GLPI v2.3; adicionado `GetTicket` em `internal/glpi`.
-- Backend consulta o GLPI fora de transação, valida que o ticket existe e confirma igualdade estrita de `external_id`.
-- Rejeita href do body; deriva ID e href oficiais estritamente da resposta do GLPI.
-- Divergência retorna `422 validation_failed` (`reconcile_external_id_mismatch`) e mantém `unknown`.
-
-### Recuperação administrativa de órfão
-- `outcome=processing_orphaned` exige `IsAdmin()` e aceita apenas solicitações com `processing_started_at <= cutoff`.
-- Rejeita ticket ID; transiciona via CAS para `unknown` e grava `processing_recovered_unknown`. Divergência retorna `409`.
-
-### Sanitização HTML e proteção XSS
-- Banco e JSON armazenam texto original puro (sem entidades HTML como `&lt;`). Proibido `dangerouslySetInnerHTML` no frontend.
-- `TicketInput.Content` escapa individualmente cada campo do usuário com `html.EscapeString` antes de converter `\n` para `<br>`.
-
-### Instâncias, timeouts e rate limit
-- Single-instance obrigatório no MVP (D-017); horários em UTC.
-- `createTimeout`: default 120s (30–600s); `recoveryMargin`: default 30s (5–300s); `orphanAge=createTimeout+recoveryMargin`.
-- Rate limiting in-memory por tenant postergado para hardening futuro (removido da T-005); 429 do GLPI vira `retryable_error`.
-
-### Dialeto e integridade de produção
-- `SQLDialect` explícito (`DialectSQLite` em runtime de produção).
-- Proibição estrita: código de produção (`cmd/server`) NUNCA deve importar `internal/testdb`.
-
-### Vínculo de equipamento durante processamento
-- `PUT /device` durante `processing` responde `200 OK` com `glpiContextUpdated: false`, altera apenas seleção local e não toca no snapshot `ticket_*`.
+- Adicionar `GetTicket` em `internal/glpi/client.go` e DTO `Ticket` em `internal/glpi/types.go`.
+- Implementar service/orquestrador de suporte e sanitização HTML individual contra XSS/dupla codificação.
+- Implementar handlers HTTP (`supportapi.go`), rotas, disputa 409 no retry e reconciliação segura.
+- Wiring no boot (`server.go`) e feature flag `WACALLS_SUPPORT_ENABLED`.
 
 ## Bloqueios
 
-- Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; T-005 mantém contexto textual.
-- `conversation_id`: fora do MVP; bloqueia somente o portal futuro.
-- Implementação T-005: bloqueada até autorização formal.
+- Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; mantido contexto textual.
+- `conversation_id`: fora do MVP; bloqueia somente portal futuro.
+- Push e etapas posteriores da T-005: bloqueados até autorização explícita.
 
 ## Estado Git do checkpoint
 
-- Branch `main` em dia com `origin/main`.
-- Documentação revisada pronta para commit local.
+- Branch `main` em dia com `origin/main` no início da etapa.
+- Commit `feat(support): add support request persistence foundation` emendado localmente.
 - Nenhum push realizado ou autorizado.
 
 ## Próximo passo
 
-Aguardar autorização formal para iniciar a implementação da `T-005` (`support_types.go`, `supportstore.go` e testes de contrato SQLite/MariaDB).
+Revisão final da fundação de persistência antes de iniciar a implementação do GLPI `GetTicket` e do service.
 
 ## Ambiente preservado
 
-- Windows 11 x64.
-- Go 1.26.4 portátil fora do repositório; caches em `D:/fabrica/WaCalls/toolchains/`.
+- Windows 11 x64 (`OhMyPi`).
+- Go 1.26.4 portátil em `D:/fabrica/WaCalls/toolchains/`.
+- Docker Desktop 4.90.0 (WSL2 backend) restrito ao harness de testes locais.
 - Nenhuma credencial real no repositório.
 
 ## Não tocar nesta etapa
@@ -97,4 +76,4 @@ Aguardar autorização formal para iniciar a implementação da `T-005` (`suppor
 - `client/`, portal/agente Windows e Flow Builder;
 - rotas existentes de `messageapi.go` e modelo `(session_id, chat_jid)`;
 - automação remota Tactical, retry automático ou worker GLPI;
-- chamadas externas reais ou código runtime até autorização.
+- chamadas externas reais ou push até autorização.

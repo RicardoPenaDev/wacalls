@@ -74,6 +74,13 @@ func OpenTestDB(t *testing.T, backend Backend) *TestDB {
 		if strings.TrimSpace(dsn) == "" {
 			t.Fatal("testdb: WACALLS_TEST_MARIADB_DSN environment variable is required for MariaDB tests")
 		}
+		if !strings.Contains(dsn, "clientFoundRows=") {
+			sep := "?"
+			if strings.Contains(dsn, "?") {
+				sep = "&"
+			}
+			dsn = dsn + sep + "clientFoundRows=true"
+		}
 
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {

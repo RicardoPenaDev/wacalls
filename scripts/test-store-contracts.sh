@@ -25,6 +25,7 @@ run_sqlite() {
     (
         cd "${REPO_ROOT}"
         WACALLS_TEST_BACKEND="sqlite" go test ./internal/testdb/... -run '^TestStoreHarnessContract$' -count=1 -timeout=5m
+        WACALLS_TEST_BACKEND="sqlite" go test ./cmd/server/... -run '^TestSupportStore' -count=1 -timeout=5m
     )
 }
 
@@ -146,6 +147,9 @@ run_mariadb() {
         WACALLS_TEST_BACKEND="mariadb" \
         WACALLS_TEST_MARIADB_DSN="${mariadb_dsn}" \
         go test ./internal/testdb/... -run '^TestStoreHarnessContract$' -count=1 -timeout=5m
+        WACALLS_TEST_BACKEND="mariadb" \
+        WACALLS_TEST_MARIADB_DSN="${mariadb_dsn}" \
+        go test ./cmd/server/... -run '^TestSupportStore' -count=1 -timeout=5m
     )
 }
 

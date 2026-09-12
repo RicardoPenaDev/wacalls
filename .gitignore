@@ -15,8 +15,9 @@ wacalls.db
 *.db-shm
 /auth/
 /data/
+# uploads/gravacoes em runtime na RAIZ do repo — NAO o pacote-fonte
+# internal/voip/media (que agora deve ser versionado)
 /media/
-media/
 client/node_modules/
 client/dist/
 client/.vite/

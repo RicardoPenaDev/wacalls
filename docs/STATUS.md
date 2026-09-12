@@ -2,15 +2,14 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa ativa: nenhuma em execução — especificação de `T-004` **finalizada**
-(`docs/tasks/T-004-CLIENTES-GLPI-TACTICAL.md`). OpenAPI GLPI analisado; código
-ainda não iniciado.
+Tarefa ativa: **nenhuma**. `T-004` concluída. `T-005` não possui especificação
+própria e não foi iniciada. Nenhuma credencial é armazenada no repositório.
 
 ## Objetivo atual
 
-Fundação offline do domínio de suporte pronta: store `device_bindings` +
-normalização/parse/match de hostname, com testes. Próximo slice técnico é
-implementar os clientes `internal/glpi` e `internal/tactical` da T-004.
+Fundação offline do domínio de suporte inclui store/normalização T-003 e
+clientes HTTP GLPI/Tactical T-004, todos testados. Próxima etapa: criar e
+revisar a especificação própria da T-005 antes de qualquer implementação.
 
 ## Concluído recentemente
 
@@ -24,23 +23,38 @@ implementar os clientes `internal/glpi` e `internal/tactical` da T-004.
   `cmd/server/devicebindingstore.go` (store `device_bindings`: `Upsert`
   idempotente por `(tenant_id, hostname_normalized)`, `Get`, `FindByHostname`,
   `Search`), com testes SQLite. Sem rotas, integrações externas ou client.
+- `T-004` — **concluída**. Clientes `internal/glpi` (API v2.3, OAuth2 password
+  grant, Computer e criação de Ticket) e `internal/tactical` (agentes
+  read-only), erros tipados, limites de body, redirects seguros e testes
+  `httptest`. Correções concluídas: validação estrita de `agent_id` contra path
+  traversal; `tokenFlight` compartilhando falha OAuth entre waiters; testes de
+  `Retry-After` HTTP-date, limite exato de body e deadlines. Build e testes
+  passam; testes não realizaram chamadas reais.
 
 ## Em andamento
 
-- Nada em execução.
+- Nenhuma tarefa em implementação. T-005 não foi iniciada.
 
-## Próxima tarefa pronta
+## Próxima etapa planejada
 
-**`T-004 — clientes internal/glpi + internal/tactical`** — contratos finalizados.
-**Tactical confirmado**: `GET /agents/` e `GET /agents/{id}/`, auth
-`X-API-KEY`. **GLPI confirmado pelo OpenAPI 3.0 real**: 11.0.8, High-Level REST
-API 2.3.0, OAuth2, Computer e Ticket sob `/api.php/v2.3`; API legada desligada.
-O cliente OAuth atual “API Teste” **não possui password grant**; criar cliente
-exclusivo WACalls com scope `api`, conta técnica e menor privilégio.
-**Limitação:** não existe rota v2.3 publicada para vínculo Ticket↔Computer.
-`LinkComputerToTicket` foi retirado da T-004; hostname e Computer ID podem ir no
-conteúdo, sem representar vínculo nativo. **D-015 registrada**; ver runbook GLPI.
-Sequência da Fase 1: T-003 → **T-004** → T-005 → T-006 → T-007 (ver `T-002`).
+Não existe `docs/tasks/T-005-*.md`. Criar e revisar uma especificação própria da
+T-005 antes de implementar `support_requests`, API ou wiring. Sequência da Fase
+1: T-003 → T-004 → **T-005** → T-006 → T-007 (ver `T-002`).
+
+## Decisões e limitações da T-004
+
+- GLPI usa apenas `/api.php/token` e `/api.php/v2.3`; API legada e
+  `LinkComputerToTicket` não fazem parte do cliente.
+- Vínculo nativo Ticket↔Computer permanece bloqueado pela ausência de rota
+  v2.3. T-005 registrará hostname/Computer ID como contexto textual.
+- Normalização privada dos clientes duplica somente `TrimSpace` + `ToUpper`;
+  compartilhar código exigiria alterar a fronteira T-003. T-005 revalida.
+- Tactical expõe somente leitura; sem script, terminal, reboot ou acesso remoto.
+- TLS verification permanece habilitada e não há opção insecure.
+- `agent_id` Tactical aceita somente ASCII alfanumérico, `_` e `-`, até 128
+  bytes; entrada inválida retorna `ErrBadRequest` sem requisição.
+- Uma falha de aquisição OAuth é compartilhada pelo grupo concorrente; nova
+  chamada após o grupo pode tentar novamente, sem cooldown global.
 
 ## Decisões e limitações da T-003
 
@@ -61,15 +75,14 @@ Sequência da Fase 1: T-003 → **T-004** → T-005 → T-006 → T-007 (ver `T-
 ## Bloqueios
 
 - Nenhum bloqueio de build.
-- Piloto GLPI bloqueado até provisionar o cliente OAuth exclusivo com password
-  grant. Vínculo nativo Ticket↔Computer bloqueado pela ausência de rota v2.3.
+- Vínculo nativo Ticket↔Computer permanece bloqueado pela ausência de rota v2.3;
+  não bloqueou a T-004.
 - `conversation_id` (Fase 4A) é pré-requisito do portal (Fase 4B), não do MVP.
 
 ## Próximo passo
 
-Provisionar e validar em **homologação** o cliente OAuth exclusivo do WACalls
-com password grant, scope `api`, conta técnica e menor privilégio. Depois,
-implementar a T-004 conforme a spec finalizada, sem `LinkComputerToTicket`.
+Criar e revisar uma especificação própria da T-005 antes de implementar
+qualquer parte dessa tarefa.
 
 ## Ambiente e comandos de validação
 
@@ -77,17 +90,20 @@ implementar a T-004 conforme a spec finalizada, sem `LinkComputerToTicket`.
 - Toolchain: **Go 1.26.4 portátil** em `D:/fabrica/WaCalls/toolchains/go1.26.4`
   (fora do repositório, não versionado). Caches em `D:/fabrica/WaCalls/toolchains/`
   (`gopath`, `gocache`), `GOTOOLCHAIN=local`.
-- O wrapper de shell bloqueia o token `go`; executar via
-  `pwsh -NoProfile -Command "... ; go <cmd>"` com `GOROOT`/`GOPATH`/`GOCACHE`/
-  `GOMODCACHE` exportados e `$env:Path` incluindo `<GOROOT>\bin`.
+- Comandos Go usam diretamente `<GOROOT>/bin/go.exe` com `GOROOT`, `GOPATH`,
+  `GOCACHE`, `GOMODCACHE` e `GOTOOLCHAIN=local`.
 
-## Baseline de validação (2026-09-12)
+## Validação da T-004 corrigida (2026-09-12)
 
-- `go version` → `go1.26.4 windows/amd64` ✅
-- `go build ./...` → **OK** ✅ (exit 0).
-- `go test ./...` → **OK** ✅ (exit 0): `ok cmd/server`, `ok internal/voip/media`,
-  `ok internal/voip/media/mlow`, `ok internal/voip/call`, `ok .../signaling`,
-  `ok .../transport`; demais pacotes sem testes.
+- `gofmt -l internal/glpi internal/tactical` → sem saída.
+- `go vet ./internal/glpi/... ./internal/tactical/...` → **OK**.
+- `go test ./internal/glpi/... -count=20` → **OK**.
+- `go test ./internal/tactical/... -count=20` → **OK**.
+- `go build ./...` → **OK**.
+- `go test ./...` → **OK** (`cmd/server` e todos os pacotes testados).
+- Race detector não executado: `-race requires cgo`; `CGO_ENABLED=0` e `gcc`
+  ausente no PATH. Nenhuma toolchain adicional foi instalada.
+- `git diff --check origin/main..HEAD` → **OK**.
 
 ## Fatos técnicos confirmados
 

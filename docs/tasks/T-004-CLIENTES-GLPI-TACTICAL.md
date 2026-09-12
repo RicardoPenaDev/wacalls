@@ -1,6 +1,6 @@
 # T-004 — Clientes `internal/glpi` + `internal/tactical`
 
-Status: **especificação finalizada** (nenhum código implementado).
+Status: **concluída** (implementação e testes offline finalizados em 2026-09-12).
 Escopo desenhado em `docs/tasks/T-002-*.md` (§Serviços de integração), D-014 e D-015.
 
 > **Nada de segredo** em código, teste, fixture, log, snapshot, STATUS ou commit.
@@ -41,11 +41,10 @@ rotas sob `/api.php/v2.3`. O token é obtido em `POST /api.php/token`; chamadas 
 API usam Bearer token. `client_credentials` continua restrito ao inventário e
 não atende a criação de tickets.
 
-O cliente OAuth atual “API Teste” aceita apenas `authorization_code` e
-`client_credentials`: **password grant não está habilitado atualmente**. Antes
-do piloto, criar um cliente OAuth exclusivo do WACalls com password grant,
-scope `api`, conta técnica dedicada, perfil/entidades mínimos e restrição de IP
-quando possível. A T-004 implementa esse contrato sem usar credenciais reais.
+Homologação validou um cliente OAuth exclusivo com password grant e scope
+`api`, conta técnica dedicada e Bearer token com `expires_in` próximo de 3600s.
+Credenciais e tokens permanecem fora do repositório; perfil/entidades mínimos e
+restrição de IP continuam requisitos operacionais.
 
 | Operação | HTTP v2.3 | Escopo |
 |---|---|---|
@@ -164,6 +163,12 @@ enganosa. Construtores: `glpi.New(cfg glpi.Config) (*glpi.Client, error)` e
 `tactical.New(cfg tactical.Config) (*tactical.Client, error)`; falham em config
 incompleta/inválida. Nada de variáveis globais.
 
+A normalização privada destes clientes replica deliberadamente apenas
+`strings.TrimSpace` + `strings.ToUpper`, sem alterar/importar o código T-003 de
+`cmd/server`. Essa duplicação é controlada: extrair um helper compartilhado
+ampliaria o escopo. A T-005 deve revalidar o hostname na fronteira de domínio
+antes de persistir ou vincular resultados externos.
+
 ## D. Configuração (somente nomes — nunca valores/tokens)
 
 - GLPI/OAuth2: `WACALLS_GLPI_BASE_URL`, `WACALLS_GLPI_CLIENT_ID`,
@@ -177,8 +182,6 @@ incompleta/inválida. Nada de variáveis globais.
   `WACALLS_TACTICAL_TIMEOUT_SECONDS` (opcional).
 - Master/flag: `WACALLS_SUPPORT_ENABLED` (T-002). Desligado ⇒ clientes não são
   construídos e o painel/rotas ficam ocultos (T-005/T-006).
-- TLS: `WACALLS_GLPI_INSECURE_TLS` / `WACALLS_TACTICAL_INSECURE_TLS` (opcional,
-  default **off**; só para homologação com certificado interno).
 
 > **Substitui a configuração GLPI preliminar da T-002:** não usar
 > `WACALLS_GLPI_TOKEN`, `APP_TOKEN`, `USER_TOKEN` ou `Session-Token`; pertencem
@@ -205,8 +208,8 @@ valores. `.env.example` recebe apenas nomes e placeholders não secretos.
 - **Redaction:** nunca logar `Authorization`, `X-API-KEY`, Client Secret,
   username, password, access/refresh token nem query string; erros nunca embutem
   segredo.
-- TLS verify **on** por default; `INSECURE_TLS` só liga `InsecureSkipVerify` de
-  forma explícita e logada (sem segredo).
+- TLS verify permanece ligado; não há flag nem opção de configuração para
+  `InsecureSkipVerify`.
 
 ## F. Testes obrigatórios (offline, `httptest`)
 
@@ -287,11 +290,12 @@ internal/tactical/client_test.go
 - **Q4 (Tactical) — RESOLVIDA para o MVP:** `GET /agents/` e
   `GET /agents/{id}/`, barras finais, auth `X-API-KEY`, DTOs privados por
   endpoint e limite de 2 MiB. Filtro server-side por hostname segue opcional.
-- **Q5 (TLS/rede):** produção exige TLS válido e allowlist; `*_INSECURE_TLS`
-  somente quando indispensável em homologação.
-- **Q6 (OAuth operacional) — PENDENTE:** o cliente “API Teste” não possui
-  password grant. Criar cliente OAuth exclusivo WACalls com scope `api`, conta
-  técnica e privilégios/entidades mínimos, restrição de IP quando possível.
+- **Q5 (TLS/rede) — RESOLVIDA:** produção e homologação exigem TLS válido;
+  T-004 não expõe opção `*_INSECURE_TLS`.
+- **Q6 (OAuth operacional) — RESOLVIDA EM HOMOLOGAÇÃO:** cliente OAuth
+  exclusivo aceita password grant, scope `api` e Bearer com expiração próxima
+  de 3600s. Credenciais não foram registradas; privilégios/entidades mínimos e
+  restrição de IP permanecem requisitos de implantação.
 - **Q7 (Ticket↔Computer) — BLOQUEIO CONFIRMADO:** não há rota v2.3 publicada.
   Não usar `Item_Ticket`, API legada ou banco. O vínculo nativo fica deferido;
   T-005 registra hostname e Computer ID no conteúdo como limitação explícita.
@@ -310,20 +314,31 @@ internal/tactical/client_test.go
 9. Tactical permanece somente leitura.
 10. Nenhum segredo em código/teste/fixture/log.
 
-## Plano de validação
+## Validação executada
 
 ```text
-go build ./...
-go test ./internal/glpi/... ./internal/tactical/...
-go test ./...
-gofmt -l  (nos arquivos criados)
-git diff --check
+gofmt -l internal/glpi internal/tactical                         # sem saída
+go vet ./internal/glpi/... ./internal/tactical/...               # OK
+go test ./internal/glpi/...                                      # OK
+go test ./internal/tactical/...                                  # OK
+go build ./...                                                   # OK
+go test ./...                                                    # OK
+git diff --check                                                 # OK
 ```
 
-## Resultado desta especificação
+## Resultado da implementação
 
-- OpenAPI real analisado; contratos GLPI v2.3 documentados e API legada removida
-  do plano.
-- Tactical lista/detalhe permanece confirmado.
-- Implementação não iniciada; próximo requisito operacional é criar o cliente
-  OAuth exclusivo do WACalls com password grant.
+- Criados `internal/glpi/{client,types,errors}.go` e testes: OAuth2 password
+  grant, cache concorrente com margem de expiração, uma renovação em GET após
+  `401`, busca exata de Computer, leitura por ID e criação não repetida de
+  Ticket com schema direto.
+- Criados `internal/tactical/{client,types,errors}.go` e testes: `X-API-KEY`,
+  lista/detalhe com DTOs privados distintos, mapper para `Agent`, busca exata e
+  contrato estritamente read-only.
+- Ambos limitam respostas a 2 MiB, fecham bodies, bloqueiam redirect para outra
+  origem, preservam TLS seguro e retornam erros tipados sem URL, segredo ou body.
+- `.env.example` contém somente nomes de configuração e valores vazios.
+- Nenhum código T-003, rota, store, wiring, T-005 ou API externa real foi
+  alterado/executado. `LinkComputerToTicket` permanece deferido pela ausência de
+  rota v2.3; T-005 deve revalidar hostname e registrar Computer ID como contexto
+  textual.

@@ -166,6 +166,24 @@ sem resiliência); fila/worker dedicado — adiada (excesso para o MVP).
 Consequência: nenhuma ação remota/reboot/script no MVP; GLPI só create/get,
 Tactical só status/busca.
 
+## D-015 — GLPI somente pela High-Level REST API v2.3
+
+Data: 2026-09-12 · Status: aceita
+
+Decisão: WACalls integra com GLPI 11 exclusivamente pela High-Level REST API
+v2.3 e OAuth2. O cliente operacional será exclusivo do WACalls, com password
+grant, scope `api`, conta técnica e menor privilégio. A API legada permanece
+desligada e o WACalls nunca acessa diretamente o banco do GLPI.
+Motivo: o OpenAPI 3.0 real da API 2.3.0 confirma Computer e Ticket, mas não
+publica rota para criar vínculo Ticket↔Computer.
+Alternativas consideradas: habilitar `apirest.php` para usar `Item_Ticket`,
+gravar diretamente no banco ou expor `LinkComputerToTicket` sempre não
+suportado — rejeitadas por segurança, acoplamento e contrato enganoso.
+Consequência: T-004 não implementa `LinkComputerToTicket`. Até surgir rota v2
+oficial, hostname e GLPI Computer ID podem constar no conteúdo do ticket como
+contexto textual, sem equivaler a vínculo nativo. O piloto depende de provisionar
+o novo cliente OAuth; o cliente atual “API Teste” não possui password grant.
+
 ## Modelo para novas decisões
 
 ```text

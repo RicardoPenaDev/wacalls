@@ -2,13 +2,15 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa ativa: nenhuma em execução — próxima pronta é `T-004`.
+Tarefa ativa: nenhuma em execução — especificação de `T-004` **finalizada**
+(`docs/tasks/T-004-CLIENTES-GLPI-TACTICAL.md`). OpenAPI GLPI analisado; código
+ainda não iniciado.
 
 ## Objetivo atual
 
 Fundação offline do domínio de suporte pronta: store `device_bindings` +
-normalização/parse/match de hostname, com testes. Próximo slice é `T-004`
-(clientes `internal/glpi` e `internal/tactical` com mocks).
+normalização/parse/match de hostname, com testes. Próximo slice técnico é
+implementar os clientes `internal/glpi` e `internal/tactical` da T-004.
 
 ## Concluído recentemente
 
@@ -16,8 +18,7 @@ normalização/parse/match de hostname, com testes. Próximo slice é `T-004`
 - `T-002` — plano técnico do slice (modelos, endpoints, clientes `internal/`,
   flags, idempotência, falhas, mapa de arquivos). Decisões D-013/D-014.
 - `T-B001` — **concluída**. Pacote `internal/voip/media` recuperado do backup e
-  versionado (84 arquivos); `.gitignore` linha 20 `media/` → `/media/`. Commit
-  `fe416df` (publicado como `f720b0b` após rebase).
+  versionado (84 arquivos); `.gitignore` linha 20 `media/` → `/media/`.
 - `T-003` — **concluída**. `cmd/server/hostname.go` (funções puras
   `normalizeHostname`/`parseHostname`/`hostnamesMatch`) e
   `cmd/server/devicebindingstore.go` (store `device_bindings`: `Upsert`
@@ -30,10 +31,15 @@ normalização/parse/match de hostname, com testes. Próximo slice é `T-004`
 
 ## Próxima tarefa pronta
 
-**`T-004 — clientes internal/glpi + internal/tactical`** com mocks/testes
-(`httptest`): `CreateTicket`/`GetTicket`/`FindComputerByName` (GLPI, create/get)
-e `GetAgentStatus`/`SearchAgents` (Tactical, somente leitura). Erros tipados
-`ErrUnavailable`/`ErrNotFound`/`ErrAuth`; base URL/token via env `WACALLS_*`.
+**`T-004 — clientes internal/glpi + internal/tactical`** — contratos finalizados.
+**Tactical confirmado**: `GET /agents/` e `GET /agents/{id}/`, auth
+`X-API-KEY`. **GLPI confirmado pelo OpenAPI 3.0 real**: 11.0.8, High-Level REST
+API 2.3.0, OAuth2, Computer e Ticket sob `/api.php/v2.3`; API legada desligada.
+O cliente OAuth atual “API Teste” **não possui password grant**; criar cliente
+exclusivo WACalls com scope `api`, conta técnica e menor privilégio.
+**Limitação:** não existe rota v2.3 publicada para vínculo Ticket↔Computer.
+`LinkComputerToTicket` foi retirado da T-004; hostname e Computer ID podem ir no
+conteúdo, sem representar vínculo nativo. **D-015 registrada**; ver runbook GLPI.
 Sequência da Fase 1: T-003 → **T-004** → T-005 → T-006 → T-007 (ver `T-002`).
 
 ## Decisões e limitações da T-003
@@ -55,15 +61,15 @@ Sequência da Fase 1: T-003 → **T-004** → T-005 → T-006 → T-007 (ver `T-
 ## Bloqueios
 
 - Nenhum bloqueio de build.
+- Piloto GLPI bloqueado até provisionar o cliente OAuth exclusivo com password
+  grant. Vínculo nativo Ticket↔Computer bloqueado pela ausência de rota v2.3.
 - `conversation_id` (Fase 4A) é pré-requisito do portal (Fase 4B), não do MVP.
 
-## Sincronização com origin/main (verificado 2026-09-12)
+## Próximo passo
 
-- Remote `https://github.com/RicardoPenaDev/wacalls.git`; branch `main`.
-- `origin/main` = `37a1953`, sincronizado após rebase; `README-BACKUP.txt`
-  presente. Recuperação do baseline VoIP e docs já **publicadas**.
-- Commit local **novo** desta sessão: `feat(support): add device binding store
-  and hostname normalization` — **não enviado** (push aguarda autorização).
+Provisionar e validar em **homologação** o cliente OAuth exclusivo do WACalls
+com password grant, scope `api`, conta técnica e menor privilégio. Depois,
+implementar a T-004 conforme a spec finalizada, sem `LinkComputerToTicket`.
 
 ## Ambiente e comandos de validação
 

@@ -1,0 +1,21 @@
+# Set default behavior: normalize all text files to LF in repository
+* text=auto eol=lf
+
+# Explicit LF for Unix scripts
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Explicit CRLF for Windows scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Explicit binary files to prevent any automatic text conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.bin binary
+*.raw binary
+*.zip binary

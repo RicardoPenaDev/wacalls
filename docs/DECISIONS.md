@@ -184,6 +184,47 @@ oficial, hostname e GLPI Computer ID podem constar no conteúdo do ticket como
 contexto textual, sem equivaler a vínculo nativo. O piloto depende de provisionar
 o novo cliente OAuth; o cliente atual “API Teste” não possui password grant.
 
+## D-016 — Resultado ambíguo de criação GLPI exige reconciliação
+
+Data: 2026-09-12 · Status: aceita
+
+Decisão: a T-005 persiste a solicitação antes do `CreateTicket` e usa claim
+atômico/token no banco. “Tentativa iniciada” significa que o consumidor chamou
+`CreateTicket`; não significa que a aplicação sabe se o GLPI recebeu o body.
+Erro de transporte, timeout, cancelamento, `5xx` ou resposta inválida dessa
+chamada deixa `support_requests.sync_state='unknown'`. Resposta HTTP válida que
+prove rejeição e falha tipada anterior ao request de ticket não são ambíguas.
+`unknown` não tem retry automático e só sai por reconciliação autorizada.
+Motivo: o cliente GLPI executa operação não repetível e a API disponível não
+oferece hoje reconciliação por `external_id`; repetir pode duplicar chamado.
+Alternativas consideradas: tratar toda falha como repetível, inferir entrega do
+body pela camada HTTP ou usar somente mutex em memória — rejeitadas por
+duplicação, informação indisponível, concorrência entre processos e reinício.
+Consequência: finalização exige o mesmo token do claim. Recuperação explícita
+converte somente `processing` comprovadamente expirado para `unknown`, por CAS,
+com evento na mesma transação; leitura nunca converte estado. O worker de D-014
+fica deferido até existir reconciliação remota confiável.
+
+## D-017 — T-005 exige instância única no MVP
+
+Data: 2026-09-12 · Status: aceita
+
+Decisão: enquanto a T-005 estiver no MVP, cada implantação terá uma única
+instância ativa do servidor. A recuperação no startup converte para `unknown`
+somente claims `processing` anteriores ao cutoff configurado; leitura nunca
+recupera estado. MariaDB da T-B002 é infraestrutura descartável de testes, não
+backend habilitado para escalar o servidor.
+Motivo: a implantação atual declara um container WACalls, usa SQLite local com
+pool de uma conexão e mantém broker, sessões e rate limits em memória.
+`internal/storage` rejeita MariaDB para o servidor, e não há leader election,
+lease ou coordenação distribuída.
+Alternativas consideradas: lease renovável, recovery somente administrativa ou
+heartbeat distribuído. Lease/heartbeat adicionariam coordenação inexistente;
+recovery só manual deixaria claims órfãos sem tratamento normal no modelo atual.
+Consequência: startup recovery é seguro sob a restrição single-instance e ainda
+respeita deadline total + margem. Suporte multi-instância futuro deve substituir
+essa decisão por lease/coordenação antes de habilitar réplicas.
+
 ## Modelo para novas decisões
 
 ```text

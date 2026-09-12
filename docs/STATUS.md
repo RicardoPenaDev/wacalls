@@ -2,128 +2,123 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa ativa: **nenhuma**. `T-004` concluída. `T-005` não possui especificação
-própria e não foi iniciada. Nenhuma credencial é armazenada no repositório.
+Tarefa atual: `T-B002` — especificada; implementação não iniciada.
+`T-005` permanece bloqueada por T-B002. Implementação e push não autorizados.
 
-## Objetivo atual
+## Objetivo imediato
 
-Fundação offline do domínio de suporte inclui store/normalização T-003 e
-clientes HTTP GLPI/Tactical T-004, todos testados. Próxima etapa: criar e
-revisar a especificação própria da T-005 antes de qualquer implementação.
+Implementar e validar a infraestrutura de teste descrita em
+`docs/tasks/T-B002-HARNESS-MARIADB-STORES.md`. Depois fazer a revisão final do
+contrato T-005 e somente então iniciar sua implementação.
 
-## Concluído recentemente
+```text
+T-B002 → revisão final T-005 → implementação T-005
+```
 
-- `T-001` — inventário/baseline confirmado no código.
-- `T-002` — plano técnico do slice (modelos, endpoints, clientes `internal/`,
-  flags, idempotência, falhas, mapa de arquivos). Decisões D-013/D-014.
-- `T-B001` — **concluída**. Pacote `internal/voip/media` recuperado do backup e
-  versionado (84 arquivos); `.gitignore` linha 20 `media/` → `/media/`.
-- `T-003` — **concluída**. `cmd/server/hostname.go` (funções puras
-  `normalizeHostname`/`parseHostname`/`hostnamesMatch`) e
-  `cmd/server/devicebindingstore.go` (store `device_bindings`: `Upsert`
-  idempotente por `(tenant_id, hostname_normalized)`, `Get`, `FindByHostname`,
-  `Search`), com testes SQLite. Sem rotas, integrações externas ou client.
-- `T-004` — **concluída**. Clientes `internal/glpi` (API v2.3, OAuth2 password
-  grant, Computer e criação de Ticket) e `internal/tactical` (agentes
-  read-only), erros tipados, limites de body, redirects seguros e testes
-  `httptest`. Correções concluídas: validação estrita de `agent_id` contra path
-  traversal; `tokenFlight` compartilhando falha OAuth entre waiters; testes de
-  `Retry-After` HTTP-date, limite exato de body e deadlines. Build e testes
-  passam; testes não realizaram chamadas reais.
+## Concluído
 
-## Em andamento
+- `T-001` — inventário/baseline do código.
+- `T-002` — plano técnico do slice; decisões D-013/D-014.
+- `T-B001` — pacote `internal/voip/media` recuperado e versionado.
+- `T-003` — normalização de hostname e store `device_bindings`, com SQLite.
+- `T-004` — clientes `internal/glpi` e `internal/tactical`, testes offline,
+  validação de path, limites, redirects e concorrência OAuth.
+- Correção documental T-005: contrato de retry, autorização, recuperação de
+  órfão, dependência T-B002 e decisão D-017 registrados. Nenhum código runtime,
+  SQL, frontend, Docker ou CI foi implementado nesta correção.
 
-- Nenhuma tarefa em implementação. T-005 não foi iniciada.
+## Ainda falta
 
-## Próxima etapa planejada
+- Implementar e validar T-B002; nenhum artefato executável do harness existe.
+- Fazer a revisão final do contrato T-005 após o aceite local/CI da T-B002.
+- Implementar T-005 somente após essa revisão e autorização explícita.
 
-Não existe `docs/tasks/T-005-*.md`. Criar e revisar uma especificação própria da
-T-005 antes de implementar `support_requests`, API ou wiring. Sequência da Fase
-1: T-003 → T-004 → **T-005** → T-006 → T-007 (ver `T-002`).
+## Contratos fechados para T-005
 
-## Decisões e limitações da T-004
+### Retry formal
 
-- GLPI usa apenas `/api.php/token` e `/api.php/v2.3`; API legada e
-  `LinkComputerToTicket` não fazem parte do cliente.
-- Vínculo nativo Ticket↔Computer permanece bloqueado pela ausência de rota
-  v2.3. T-005 registrará hostname/Computer ID como contexto textual.
-- Normalização privada dos clientes duplica somente `TrimSpace` + `ToUpper`;
-  compartilhar código exigiria alterar a fronteira T-003. T-005 revalida.
-- Tactical expõe somente leitura; sem script, terminal, reboot ou acesso remoto.
-- TLS verification permanece habilitada e não há opção insecure.
-- `agent_id` Tactical aceita somente ASCII alfanumérico, `_` e `-`, até 128
-  bytes; entrada inválida retorna `ErrBadRequest` sem requisição.
-- Uma falha de aquisição OAuth é compartilhada pelo grupo concorrente; nova
-  chamada após o grupo pode tentar novamente, sem cooldown global.
+- `POST /api/support/requests/{id}/retry` aceita somente `retryable_error`.
+- Atendente comum pode executar quando tenant e conversa forem acessíveis.
+- `new`, `processing`, `unknown`, `synced` e `failed` retornam `409`; não há POST
+  GLPI nesses estados.
+- Cada retry gera novo `processing_token` e disputa CAS; somente
+  `RowsAffected()==1` chama GLPI.
+- `Idempotency-Key`, `external_id` e fingerprint são preservados.
+- Sucesso de aceite responde `202`. Não existe retry automático; `unknown`
+  requer reconciliação.
 
-## Decisões e limitações da T-003
+### Permissões
 
-- Store exige `tenant_id` não-vazio (`ErrMissingTenant`) em `Upsert`,
-  `FindByHostname` e `Search` — isolamento por empresa (D-009/D-013). `Get` é
-  por `id` global.
-- `Upsert` **enriquece** atomicamente: valor não-vazio vence, vazio nunca limpa
-  um id gravado; `id`/`created_at` preservados no conflito. `match_status`:
-  inserção vazia → `pending`; atualização vazia → **mantém** o status atual;
-  valor explícito (incl. `pending`) é aplicado. Validado contra o conjunto
-  `pending|matched|conflict|missing_glpi|missing_tactical|disabled`.
-- Erros distinguíveis: `ErrDeviceBindingNotFound`, `ErrInvalidHostname`,
-  `ErrMissingTenant`, `ErrDeviceBindingConflict` (id reusado com outra chave),
-  `ErrInvalidMatchStatus` (status fora do conjunto documentado).
-- **Deferido** (D-013): detectar duplicidade real de origem e marcar
-  `match_status='conflict'` é do sync (T-004+), não do store.
+- `user_permissions` persiste strings e `currentUser.Permissions` é `[]string`.
+- O backend não tem enforcement granular/`HasPermission`, e o catálogo frontend
+  não contém `support.reconcile`.
+- Logo, reconcile e recovery administrativo exigem `currentUser.IsAdmin()` no
+  MVP. `support.reconcile` fica para evolução futura completa de backend + UI.
+
+### Instâncias e recovery
+
+- A implantação atual tem um container WACalls, SQLite local/pool de uma conexão
+  e estado de broker/sessões/rate limit em memória; não há lease ou coordenação.
+- MVP exige uma única instância ativa por implantação (D-017).
+- O claim grava `processing_started_at` em UTC.
+- `createTimeout`: default 120 s, mínimo 30, máximo 600.
+- `recoveryMargin`: default 30 s, mínimo 5, máximo 300.
+- `orphanAge=createTimeout+recoveryMargin`;
+  `cutoff=time.Now().UTC().Add(-orphanAge).Unix()`.
+- Startup, após schema e antes das rotas de suporte, recupera somente
+  `processing_started_at<=cutoff` por CAS. Leitura nunca altera estado.
+- Sem heartbeat. A rota administrativa reutiliza a rotina e exige `IsAdmin()`.
 
 ## Bloqueios
 
-- Nenhum bloqueio de build.
-- Vínculo nativo Ticket↔Computer permanece bloqueado pela ausência de rota v2.3;
-  não bloqueou a T-004.
-- `conversation_id` (Fase 4A) é pré-requisito do portal (Fase 4B), não do MVP.
+- T-005: bloqueada por ausência de harness MariaDB automatizado.
+- Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; T-005 mantém
+  contexto textual.
+- `conversation_id`: fora do MVP; bloqueia somente o portal futuro.
+
+## Escopo da T-B002
+
+- MariaDB 11.4 descartável, isolado, credenciais efêmeras e porta loopback.
+- Mesma suíte de contrato SQLite/MariaDB: schema, transação, unique, conflito,
+  CAS/`RowsAffected`, concorrência, rollback e cleanup.
+- Scripts local/CI com readiness e timeouts; nenhum GLPI/Tactical real.
+- Não implementar `support_requests` na T-B002.
+
+## Validação registrada
+
+- Checkpoint documental: `git diff --check` → **OK**.
+- Última validação de código, na T-004: `gofmt -l` sem saída;
+  `go vet ./internal/glpi/... ./internal/tactical/...` → **OK**;
+  testes dos dois pacotes com `-count=20` → **OK**;
+  `go build ./...` e `go test ./...` → **OK**.
+- Race detector não executado: CGO desabilitado e `gcc` ausente.
+- Nenhum código executável mudou desde essa validação; testes Go/frontend não
+  se aplicam ao checkpoint documental.
+
+## Estado Git do checkpoint
+
+- Branch `main` acompanha `origin/main` com um commit documental local ainda não
+  publicado.
+- Não há merge ou rebase pendente.
+- Working tree limpa após o amend; nenhum arquivo não commitado.
+- Nenhum push realizado.
 
 ## Próximo passo
 
-Criar e revisar uma especificação própria da T-005 antes de implementar
-qualquer parte dessa tarefa.
+Implementar T-B002 exatamente pela task. Após aceite local e CI, revisar o
+contrato T-005, então pedir autorização separada antes de qualquer código T-005
+ou push.
 
-## Ambiente e comandos de validação
+## Ambiente preservado
 
-- SO: Windows 11 (`Windows_NT`, 10.0.26200), x64/AMD64.
-- Toolchain: **Go 1.26.4 portátil** em `D:/fabrica/WaCalls/toolchains/go1.26.4`
-  (fora do repositório, não versionado). Caches em `D:/fabrica/WaCalls/toolchains/`
-  (`gopath`, `gocache`), `GOTOOLCHAIN=local`.
-- Comandos Go usam diretamente `<GOROOT>/bin/go.exe` com `GOROOT`, `GOPATH`,
-  `GOCACHE`, `GOMODCACHE` e `GOTOOLCHAIN=local`.
+- Windows 11 x64.
+- Go 1.26.4 portátil fora do repositório; caches em
+  `D:/fabrica/WaCalls/toolchains/`.
+- Nenhuma credencial real no repositório.
 
-## Validação da T-004 corrigida (2026-09-12)
+## Não tocar nesta etapa
 
-- `gofmt -l internal/glpi internal/tactical` → sem saída.
-- `go vet ./internal/glpi/... ./internal/tactical/...` → **OK**.
-- `go test ./internal/glpi/... -count=20` → **OK**.
-- `go test ./internal/tactical/... -count=20` → **OK**.
-- `go build ./...` → **OK**.
-- `go test ./...` → **OK** (`cmd/server` e todos os pacotes testados).
-- Race detector não executado: `-race requires cgo`; `CGO_ENABLED=0` e `gcc`
-  ausente no PATH. Nenhuma toolchain adicional foi instalada.
-- `git diff --check origin/main..HEAD` → **OK**.
-
-## Fatos técnicos confirmados
-
-- Módulo `wacalls`, `go 1.26.4`.
-- Conversa identificada por `(session_id, chat_jid)`; **sem** `conversation_id`.
-- Rotas de chat em `cmd/server/messageapi.go` (não alterar):
-  `GET /api/sessions/{sid}/chats`, `.../{jid}/messages`, `POST .../{jid}/send`.
-- Store: `newXStore(ctx, db)` cria schema no boot; migrations aditivas =
-  `ALTER TABLE ADD COLUMN` best-effort. Roda em SQLite e MariaDB.
-- Rotas agregadas por `s.registerXRoutes(mux)` em `httpapi.go` com `requireAuth`.
-- Idempotência: `ON CONFLICT ... DO UPDATE` / `INSERT OR IGNORE` + índice único.
-- Feature flag: env + `features map[string]bool` em `GET /api/settings/options`.
-- Multitenancy SaaS já existe (tenant = empresa). Secretaria ≠ tenant (D-009).
-
-## Arquivos da Fase 1 (mapa completo em T-002)
-
-- Criar: `cmd/server/hostname.go`, `devicebindingstore.go`, `supportstore.go`,
-  `supportapi.go`, `support_integration.go`; `internal/glpi/*`, `internal/tactical/*`;
-  testes; `client/src/services/support.ts`, `.../components/domain/support/SupportPanel.tsx`.
-- Alterar (aditivo): `server.go` (wiring), `httpapi.go` (registerSupportRoutes),
-  `settingsapi.go` (`features["support"]`), `ChatsPage.tsx` (montar painel).
-- **Não** alterar: `flowexec*.go`, `flowbridge.go`, `flow{api,store}.go`,
-  rotas/handlers de `messageapi.go`, o modelo `(session_id, chat_jid)`.
+- `client/`, portal/agente Windows e Flow Builder;
+- rotas existentes de `messageapi.go` e modelo `(session_id, chat_jid)`;
+- automação remota Tactical, retry automático ou worker GLPI;
+- API legada GLPI, chamadas externas reais ou vínculo nativo Ticket↔Computer.

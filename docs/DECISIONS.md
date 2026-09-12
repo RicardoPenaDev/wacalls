@@ -219,11 +219,33 @@ pool de uma conexão e mantém broker, sessões e rate limits em memória.
 `internal/storage` rejeita MariaDB para o servidor, e não há leader election,
 lease ou coordenação distribuída.
 Alternativas consideradas: lease renovável, recovery somente administrativa ou
-heartbeat distribuído. Lease/heartbeat adicionariam coordenação inexistente;
-recovery só manual deixaria claims órfãos sem tratamento normal no modelo atual.
+heartbeat distribuído. Lease/heartbeat adicionariam coordenação inexistente; recovery só
+manual deixaria claims órfãos sem tratamento automatizado após crash.
 Consequência: startup recovery é seguro sob a restrição single-instance e ainda
 respeita deadline total + margem. Suporte multi-instância futuro deve substituir
 essa decisão por lease/coordenação antes de habilitar réplicas.
+
+## D-018 — Create+claim atômico e reconciliação segura com validação remota de external_id
+
+Data: 2026-09-12 · Status: aceita
+
+Decisão: na T-005, a criação de `support_requests` persiste a linha e reivindica o claim
+na mesma transação inicial (estado `processing`, com `processing_token`,
+`processing_started_at` e eventos `created` + `ticket_claimed`). Não há estado `new`
+persistido sem claim ativo, eliminando requests órfãs em caso de crash precoce.
+Adicionalmente, `POST /api/support/requests/{id}/reconcile` com `outcome=synced` exige
+verificação remota via `GetTicket` no GLPI, confirmando a existência do ticket e a
+igualdade estrita de `external_id`, derivando ID e href da resposta oficial do GLPI e
+rejeitando href arbitrário fornecido pelo cliente. O rate limit local fica deferido
+para hardening posterior.
+Motivo: evitar que falhas entre a inserção e o claim deixem registros inacessíveis a retry
+e recovery, e impedir que reconciliação administrativa vincule chamados incorretos ou
+injete links maliciosos sem validação remota.
+Alternativas consideradas: manter `new` com recovery dedicado de `new` órfão, aceitar
+href arbitrário no reconcile ou confiar cegamente no ID GLPI fornecido pelo admin.
+Consequência: o ciclo de vida inicial é imune a interrupções não recuperáveis; GLPI
+ganha método de consulta `GetTicket`; e o rate limit de 10 claims/60s não entra no escopo
+inicial do MVP.
 
 ## Modelo para novas decisões
 

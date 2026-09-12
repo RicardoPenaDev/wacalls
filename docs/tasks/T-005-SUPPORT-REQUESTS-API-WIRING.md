@@ -1,11 +1,11 @@
 # T-005 — support_requests, API interna e wiring GLPI/Tactical
 
-Status: **especificação pronta para revisão; implementação não iniciada**.
+Status: **especificação e plano de implementação finalizados; implementação não iniciada**.
 
 Esta tarefa planeja somente o backend do domínio de suporte sobre as conversas
-WhatsApp atuais `(session_id, chat_jid)`. T-003 (`device_bindings`) e T-004
-(clientes GLPI/Tactical) estão concluídas. Não existe `conversation_id` nesta
-fase.
+WhatsApp atuais `(session_id, chat_jid)`. T-003 (`device_bindings`), T-004
+(clientes GLPI/Tactical) e T-B002 (harness MariaDB de stores) estão concluídas.
+Não existe `conversation_id` nesta fase.
 
 > Testes da futura implementação serão 100% offline. Nenhuma credencial, token,
 > senha, API key, body externo bruto ou chamada real entra em código, fixture,
@@ -16,20 +16,24 @@ fase.
 Entregar, atrás de `WACALLS_SUPPORT_ENABLED`:
 
 1. store aditivo `support_requests`, com isolamento por empresa SaaS e auditoria;
-2. criação síncrona e idempotente de ticket GLPI;
+2. criação síncrona, atômica e idempotente de ticket GLPI (create+claim na mesma transação, eliminando requests presas em `new`);
 3. resolução exata e opcional de equipamento usando `device_bindings`, GLPI e
    Tactical somente leitura;
-4. endpoints internos aditivos para contexto, equipamento, criação e estado;
-5. wiring das interfaces consumidoras pequenas no `cmd/server`;
-6. tratamento conservador de resultado remoto ambíguo, sem worker automático.
+4. endpoints internos aditivos para contexto, equipamento, criação, retry, concorrência e reconciliação segura;
+5. wiring das interfaces consumidoras pequenas no `cmd/server`, com dialeto explícito;
+6. recuperação conservadora de claim órfão no boot (single-instance), sem worker automático.
 
 T-005 não entrega frontend, SupportPanel, portal Windows, cache Tactical, runner
-de retry nem sincronização posterior com o GLPI.
+de retry nem rate limiting in-memory (postergado para hardening futuro).
 
 ## 2. Inventário confirmado no código
 
 - Stores seguem `type xStore struct{ db *sql.DB }` e `newXStore(ctx, db)`, criando
-  schema aditivo no boot (`server.go`).
+  schema aditivo no boot (`server.go`). Atualmente nenhum store recebe informação
+  de dialeto do banco; a T-005 introduz `SQLDialect` explícito (`sqlite` e `mariadb`)
+  no construtor do novo store. O runtime de produção em `cmd/server` inicializa com
+  `DialectSQLite`. Código de produção NUNCA deve importar `internal/testdb`; este pacote
+  é restrito aos testes contratuais (`*_test.go`).
 - `deviceBindingStore` já oferece `Get`, `Search`, `FindByHostname` e `Upsert`.
   `Get` recebe apenas `id`; todo consumidor HTTP deve comparar `TenantID` antes
   de devolver ou alterar o vínculo.
@@ -48,11 +52,15 @@ de retry nem sincronização posterior com o GLPI.
 - Workers existentes recebem o contexto do servidor e encerram em `ctx.Done()`.
   T-005 não inicia worker.
 - Não há testes de handler com `httptest.NewRecorder/NewRequest` no backend
-  atual; T-005 introduzirá esse padrão somente para as rotas novas.
+  atual; T-005 introduzirá esse padrão para as rotas novas.
 - `internal/glpi.Client` implementa `FindComputerByHostname`, `GetComputer` e
-  `CreateTicket`; o POST nunca é repetido automaticamente.
+  `CreateTicket`; a T-005 adiciona `GetTicket` para viabilizar reconciliação segura.
+  O POST nunca é repetido automaticamente.
 - `internal/tactical.Client` implementa `FindAgentByHostname` e `GetAgent`, ambos
   somente leitura.
+- Não existe componente de rate limit reutilizável por tenant/usuário no backend
+  (apenas `loginLimiter` por IP no login). A proposta de 10 claims/60s foi
+  removida da T-005 e transferida para hardening posterior.
 - `.env.example` já contém `WACALLS_SUPPORT_ENABLED` e os nomes atuais de GLPI e
   Tactical. T-005 não precisa adicionar variável.
 
@@ -68,26 +76,34 @@ de retry nem sincronização posterior com o GLPI.
    ticket por `external_id`, e um timeout após POST pode esconder ticket criado.
    T-005 não terá worker; resultado ambíguo exige reconciliação manual. Esta
    decisão material é registrada em D-016.
-4. O MVP descreve vínculo Ticket↔Computer, mas a API GLPI v2.3 não publica essa
+4. D-017 estabelece o requisito temporário de instância única (single-instance)
+   no MVP, permitindo que a recuperação de órfãos (`RecoverOrphanedProcessing`)
+   no startup seja segura sem coordenação distribuída.
+5. D-018 define o padrão de create+claim atômico: a inserção inicial já nasce em
+   `processing` com token e timestamps, gravando `created` e `ticket_claimed` na
+   mesma transação. Não existe estado `new` persistido de forma órfã.
+6. D-018 também define a reconciliação segura: `outcome=synced` exige verificação
+   remota via `GetTicket` no GLPI validando o `external_id`, derivando ID e href
+   diretamente da resposta do GLPI e rejeitando href arbitrário.
+7. O MVP descreve vínculo Ticket↔Computer, mas a API GLPI v2.3 não publica essa
    rota. T-005 envia hostname e Computer ID apenas como contexto textual.
-5. O código expõe recursos do plano por `activePlanLimits`, mas
+8. O código expõe recursos do plano por `activePlanLimits`, mas
    `GET /api/settings/options` hoje só devolve o JSON persistido de `options`.
-   A implementação deve acrescentar apenas `features.support: bool`, sem expor
+   A implementação acrescentará apenas `features.support: bool`, sem expor
    configuração ou segredos.
-6. O CORS atual não permite o header `Idempotency-Key`; a implementação deve
+9. O CORS atual não permite o header `Idempotency-Key`; a implementação deve
    adicioná-lo a `Access-Control-Allow-Headers` sem abrir novas origens.
-7. Alguns stores existentes usam `ON CONFLICT`, embora o projeto também abra
-   MariaDB. O store novo usará `INSERT` + detecção de unique violation + `SELECT`
-   e `UPDATE ... WHERE sync_state IN (...)`, evitando sintaxe de upsert exclusiva
-   do SQLite.
+10. O store novo selecionará DDL por `SQLDialect` explícito (`sqlite` ou `mariadb`)
+    passado no construtor. Não usar detecção por probing ou reflexão. O runtime do
+    WACalls inicializa com `DialectSQLite`; o harness MariaDB da T-B002 é usado
+    exclusivamente pelos testes de contrato. Código de produção não deve importar
+    `internal/testdb`. A T-005 não converte o runtime do servidor em MariaDB.
 
 ## 4. Modelo `support_requests`
 
 ### 4.1 Schema lógico completo
 
-O store seleciona DDL por driver. Não usar `AUTOINCREMENT`, `INSERT OR IGNORE`,
-`ON CONFLICT`, `INSERT IGNORE` ou `ON DUPLICATE KEY` no caminho compartilhado.
-IDs opacos são gerados no servidor; timestamps são segundos Unix UTC.
+O store seleciona DDL por `SQLDialect` explícito (`sqlite` e `mariadb`) passado no construtor. Não usar `AUTOINCREMENT`, `INSERT OR IGNORE`, `ON CONFLICT`, `INSERT IGNORE` ou `ON DUPLICATE KEY` no caminho compartilhado. IDs opacos são gerados no servidor; timestamps são segundos Unix UTC.
 
 | Campo | SQLite | MariaDB/InnoDB | Nullable | Contrato |
 |---|---|---|---|---|
@@ -114,15 +130,15 @@ IDs opacos são gerados no servidor; timestamps são segundos Unix UTC.
 | `external_id` | `TEXT` | `VARCHAR(40) CHARACTER SET ascii COLLATE ascii_bin` | não | formato exato da seção 7 |
 | `idempotency_key` | `TEXT` | `VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin` | não | 16–128 bytes ASCII |
 | `payload_fingerprint` | `TEXT` | `CHAR(64) CHARACTER SET ascii COLLATE ascii_bin` | não | SHA-256 hexadecimal |
-| `sync_state` | `TEXT` | `VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin` | não | conjunto fechado da seção 6 |
+| `sync_state` | `TEXT` | `VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin` | não | conjunto fechado: processing, synced, retryable_error, unknown, failed |
 | `last_error_code` | `TEXT` | `VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin` | não | código interno allowlisted |
 | `attempt_count` | `INTEGER` | `INT UNSIGNED` | não | claims autorizados destinados a `CreateTicket` |
-| `processing_token` | `TEXT` | `VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin` | não | vazio ou 128 bits em hex |
-| `processing_started_at` | `INTEGER` | `BIGINT` | não | início do claim atual; zero fora dele |
-| `processed_at` | `INTEGER` | `BIGINT` | não | fim da última tentativa; zero até ocorrer |
-| `created_at` | `INTEGER` | `BIGINT` | não | criação |
-| `updated_at` | `INTEGER` | `BIGINT` | não | última alteração |
-| `synced_at` | `INTEGER` | `BIGINT` | não | sucesso; zero até `synced` |
+| `processing_token` | `TEXT` | `VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin` | não | 128 bits em hex; vazio fora de processing |
+| `processing_started_at` | `INTEGER` | `BIGINT` | não | início do claim atual em UTC; zero fora dele |
+| `processed_at` | `INTEGER` | `BIGINT` | não | fim da última tentativa em UTC; zero até ocorrer |
+| `created_at` | `INTEGER` | `BIGINT` | não | criação em UTC |
+| `updated_at` | `INTEGER` | `BIGINT` | não | última alteração em UTC |
+| `synced_at` | `INTEGER` | `BIGINT` | não | sucesso em UTC; zero até `synced` |
 
 No SQLite, tamanhos e conjunto de estados são `CHECK` constraints equivalentes
 aos limites acima. No MariaDB, a tabela usa `ENGINE=InnoDB`,
@@ -155,14 +171,18 @@ a session/chat/binding são validadas por tenant na mesma operação transaciona
 
 `device_binding_id` e `hostname_*` descrevem a seleção local atual.
 `ticket_device_binding_id`, `ticket_hostname_*` e `ticket_glpi_computer_id`
-formam o snapshot mínimo usado para montar `TicketInput.Content`. O claim grava
-esse snapshot na mesma transação que passa a linha para `processing`.
+formam o snapshot mínimo usado para montar `TicketInput.Content`. Na criação, o
+claim atômico grava imediatamente os dados locais disponíveis nesse snapshot.
+Se consultas externas subsequentes resolverem IDs adicionais (ex.: GLPI Computer ID),
+esse snapshot é enriquecido em transação separada antes de `CreateTicket`,
+condicionada estritamente ao mesmo `processing_token`.
 
 Depois que `CreateTicket` é chamado, o snapshot é imutável, inclusive em
 `synced`, `unknown` ou `failed`. Uma falha comprovadamente anterior à chamada
-pode voltar a `retryable_error`; o próximo claim autorizado pode substituir o
-snapshot porque nenhuma tentativa de criação ocorreu. Trocar o vínculo atual
-depois da chamada nunca reescreve o snapshot nem o ticket remoto.
+pode voltar a `retryable_error`; o próximo claim autorizado de retry pode
+substituir o snapshot porque nenhuma tentativa de criação ocorreu. Trocar o
+vínculo atual (`PUT /device`) depois da chamada nunca reescreve o snapshot nem o
+ticket remoto.
 
 `device_binding_id` representa o equipamento **afetado**. A origem não é
 persistida nesta fase porque o canal é WhatsApp e não existe portal/agente
@@ -213,12 +233,13 @@ INDEX idx_support_request_events_request
 ticket_unknown|device_linked|device_replaced|processing_recovered_unknown|
 reconciled_synced|reconciled_retryable`.
 
-Eventos são append-only: o store não expõe update/delete. A criação da
-`support_request` e `created` ocorre na mesma transação. Cada mudança de estado,
-snapshot ou equipamento e seu evento ocorre em uma única transação; falha do
-evento causa rollback da mudança. O evento guarda somente IDs mínimos e códigos
-allowlisted: nunca descrição, credencial, body/resposta, href sensível ou erro
-externo bruto.
+Eventos são append-only: o store não expõe update/delete. A criação inicial da
+`support_request` (já com claim em `processing`) e os eventos `created` e
+`ticket_claimed` ocorrem na mesma transação atômica. Cada mudança posterior de
+estado, snapshot ou equipamento e seu evento correspondente ocorre em uma única
+transação; falha do evento causa rollback da mudança. O evento guarda somente IDs
+mínimos e códigos allowlisted: nunca descrição, credencial, body/resposta, href
+sensível ou erro externo bruto.
 
 ## 6. Máquina de estados
 
@@ -226,27 +247,38 @@ Estados pequenos e explícitos:
 
 | Estado | Significado | Nova tentativa |
 |---|---|---|
-| `new` | solicitação e evento inicial persistidos; nenhum claim ativo | somente fluxo inicial vencedor |
-| `processing` | um token ganhou o claim e `CreateTicket` pode ter sido chamado | proibida por concorrentes |
+| `processing` | solicitação criada e claim ativo; `CreateTicket` em andamento | proibida por concorrentes |
 | `synced` | GLPI confirmou `201`; ID/href persistidos | terminal |
-| `retryable_error` | há prova de que nenhum ticket foi criado | somente ação explícita autorizada |
-| `unknown` | não é possível provar se o GLPI criou o ticket | somente reconciliação autorizada |
+| `retryable_error` | há prova de que nenhum ticket foi criado | somente ação explícita `/retry` autorizada |
+| `unknown` | não é possível provar se o GLPI criou o ticket | somente reconciliação administrativa autorizada |
 | `failed` | validação/configuração/rejeição determinística | terminal; nova intenção usa nova chave |
+
+> **Eliminação do estado `new` persistente:**
+> `StateNew` **não existe como estado persistente** na tabela `support_requests`. A coluna
+> `sync_state` admite estritamente o conjunto: `processing`, `synced`, `retryable_error`,
+> `unknown` e `failed`.
+> No domínio da aplicação, "novo" representa unicamente a intenção em memória recebida
+> no request HTTP antes da persistência. Se o banco permitisse comitar uma linha em `new`
+> separada do claim, uma queda de processo imediatamente posterior ao commit deixaria a
+> requisição presa para sempre: o replay responderia `202` sem tomar claim, o `/retry`
+> rejeitaria `new` (que só aceita `retryable_error`), e o startup ignoraria a linha
+> (pois `RecoverOrphanedProcessing` busca apenas `processing`).
+> Na criação atômica da T-005, o primeiro `INSERT` já grava a linha em `processing`
+> (com `processing_token`, `processing_started_at` e eventos `created` + `ticket_claimed`
+> na mesma transação atômica). Dessa forma, qualquer falha ou crash posterior do processo é
+> 100% coberta pela recuperação de órfãos baseada em cutoff temporal.
 
 Transições permitidas:
 
 ```text
-new             -> processing       (somente fluxo inicial vencedor)
-new             -> failed           (configuração/validação determinística)
-new             -> retryable_error  (falha segura anterior ao ticket)
-retryable_error -> processing       (retry explícito)
-processing      -> synced
-processing      -> retryable_error
-processing      -> unknown
-processing      -> failed
-processing      -> unknown          (recuperação de claim órfão)
-unknown         -> synced            (reconciliação encontrou ticket)
-unknown         -> retryable_error   (reconciliação confirmou ausência)
+(criação atômica) -> processing       (created + ticket_claimed na mesma transação)
+processing        -> synced           (GLPI confirmou 201 com ID e href válidos)
+processing        -> failed           (rejeição determinística 4xx do GLPI ou config inválida)
+processing        -> retryable_error  (falha segura comprovadamente anterior ao CreateTicket)
+processing        -> unknown          (falha ambígua pós-POST ou recuperação de órfão)
+retryable_error   -> processing       (retry explícito via CAS com token novo)
+unknown           -> synced           (reconciliação admin após GetTicket confirmar external_id)
+unknown           -> retryable_error  (reconciliação admin confirmando ausência de ticket)
 ```
 
 Qualquer outra transição retorna conflito. Mudança de estado e evento sempre
@@ -260,16 +292,12 @@ GLPI; a camada não conhece esse fato.
 
 - JSON/header/campo inválido rejeitado antes de aceitar a solicitação retorna
   `400/422` e não cria linha.
-- Validação ou configuração determinística detectada depois de persistir a
-  solicitação, mas antes de operação externa, termina em `failed`, sem
-  `CreateTicket`.
 - Falha de autenticação comprovadamente anterior ao request de ticket, indicada
   por erro tipado do cliente com `Op=="token"`, nunca é ambígua:
   credencial/configuração permanentemente rejeitada vira `failed`; timeout,
   indisponibilidade ou falha transitória de token vira `retryable_error`.
-- Rate limit local, de token ou resposta HTTP `429` válida que prove rejeição
-  antes da criação vira `retryable_error`; preservar `Retry-After`, mas não
-  iniciar worker nem retry automático.
+- Resposta HTTP `429` do GLPI que prove rejeição antes ou durante criação vira
+  `retryable_error`; preservar `Retry-After`, mas não iniciar worker nem retry automático.
 - Depois que `CreateTicket` é chamado, erro de transporte, timeout,
   cancelamento, redirect bloqueado, `5xx`, body excessivo ou resposta de sucesso
   inválida vira `unknown`, porque não há prova de ausência do ticket.
@@ -353,16 +381,20 @@ Mesma chave e fingerprint sempre carregam a mesma linha, sem claim implícito:
 | Estado persistido | Replay da criação |
 |---|---|
 | `synced` | `200`, ticket existente |
-| `new` | `202`, sem claim; somente o fluxo inicial vencedor pode avançar |
 | `processing` | `202`, sem claim |
-| `retryable_error` | `202`, sem retry; ação explícita `/retry` necessária |
+| `retryable_error` | `202`, sem retry automático; ação explícita `/retry` necessária |
 | `unknown` | `202`, sem claim; somente reconciliação |
 | `failed` | `200`, resultado terminal existente |
 
 Para corrigir uma solicitação `failed`, o cliente envia nova intenção ao
 endpoint de criação com **nova** `Idempotency-Key`; não existe transição
 `failed->processing`. Mesma chave com fingerprint diferente retorna `409` em
-qualquer estado.
+qualquer estado (`idempotency_key_reused`).
+
+Em caso de requisições concorrentes disparadas com a mesma chave e mesmo fingerprint,
+a corrida na inserção inicial é resolvida pelo banco: a segunda requisição sofre
+violação de chave única, faz rollback, recarrega a linha e aplica a tabela de replay
+acima (respondendo `202`), **nunca retornando `state_conflict`** para um replay válido.
 
 ### 7.2 Payload canônico
 
@@ -404,59 +436,74 @@ O resultado tem 40 caracteres ASCII. `support_request.id` é UUID aleatório;
 chave de idempotência, tenant legível e PII nunca são enviados no
 `external_id`.
 
-### 7.3 Criação, claim e finalização transacionais
+### 7.3 Criação, claim e finalização transacionais (Create+Claim Atômico)
 
-1. Autenticar; derivar tenant/ator/permissões do contexto; autorizar session/chat;
-   validar limites; calcular fingerprint.
-2. Abrir transação. Fazer `INSERT` simples em `new` e inserir evento `created`.
-   Ambos devem ter sucesso antes do commit.
-3. Em unique violation de `(tenant_id,idempotency_key)`, fazer rollback,
-   carregar por tenant/chave e aplicar a tabela de replay. Nunca executar upsert.
-4. Somente a chamada que inseriu a linha pode seguir automaticamente. Resolver
-   equipamento e preparar snapshot; um replay de linha `new` não toma o claim.
-5. Para o fluxo inicial ou `/retry` permitido, gerar **novo** token de 16 bytes
-   com `crypto/rand`, codificar em 32 hex minúsculos e abrir nova transação.
-6. Executar o CAS:
+Para eliminar a janela em que um processo poderia cair entre o `INSERT` inicial
+e o claim (deixando o registro preso em `new` para sempre), a criação da
+`support_request` realiza a persistência e a tomada do claim na **mesma transação inicial**:
 
-   ```sql
-   UPDATE support_requests
-      SET sync_state='processing', processing_token=?,
-          processing_started_at=?, processed_at=0,
-          attempt_count=attempt_count+1,
-          ticket_device_binding_id=?, ticket_hostname_informed=?,
-          ticket_hostname_normalized=?, ticket_glpi_computer_id=?,
-          updated_at=?
-    WHERE id=? AND tenant_id=? AND processing_token=''
-      AND sync_state=?;
-   ```
+1. **Autenticação e Validação:** Autenticar; derivar tenant/ator/permissões do contexto;
+   autorizar session/chat; validar limites de payload; calcular `payload_fingerprint` e `external_id`.
+2. **Preparação de Token:** Gerar previamente o `processing_token` de 16 bytes criptográficos
+   (32 caracteres hex minúsculos).
+3. **Transação 1 (Criação + Claim Atômico):**
+   - Abrir transação no banco.
+   - Executar `INSERT` em `support_requests` já com `sync_state='processing'`,
+     `processing_token`, `processing_started_at=time.Now().UTC().Unix()`, `attempt_count=1`,
+     e snapshot local imediato (`ticket_device_binding_id`, `ticket_hostname_*`).
+   - Inserir evento `created` na mesma transação.
+   - Inserir evento `ticket_claimed` na mesma transação.
+   - Commit!
+   - Em caso de unique violation de `(tenant_id, idempotency_key)`, fazer rollback,
+     carregar por tenant/chave e aplicar a tabela de replay da seção 7.1.
+4. **Consultas Externas e Enriquecimento (Fora de Transação):**
+   - Nenhuma chamada externa é executada dentro da Transação 1.
+   - Executar resolução de equipamento em `device_bindings`, Tactical e GLPI (somente leitura,
+     com context timeout).
+   - Se dados remotos enriquecerem o snapshot (ex.: `glpi_computer_id`), abrir **Transação 2 (Enriquecimento)**:
+     ```sql
+     UPDATE support_requests
+        SET ticket_glpi_computer_id=?, ticket_device_binding_id=?, updated_at=?
+      WHERE id=? AND tenant_id=? AND sync_state='processing' AND processing_token=?;
+     ```
+     Se `RowsAffected()==0`, o claim foi perdido (ex.: cutoff de órfão assumido por outro fluxo); abortar imediatamente sem chamar `CreateTicket`.
+     Se houver alteração material, registrar evento de auditoria `snapshot_enriched` na mesma transação.
+     Commit!
+5. **Chamada Remota GLPI (Zero Transações Abertas):**
+   - Chamar `CreateTicket` no cliente GLPI fora de qualquer transação de banco de dados.
+6. **Transação 3 (Finalização por CAS):**
+   - Classificar o resultado conforme a seção 6.1 (`synced`, `failed`, `retryable_error` ou `unknown`).
+   - Abrir transação e atualizar:
+     ```sql
+     UPDATE support_requests
+        SET sync_state=?, last_error_code=?, glpi_ticket_id=?, glpi_ticket_href=?,
+            synced_at=?, processing_token='', processing_started_at=0,
+            processed_at=?, updated_at=?
+      WHERE id=? AND tenant_id=? AND sync_state='processing' AND processing_token=?;
+     ```
+   - Se `RowsAffected()==1`, inserir o evento final correspondente (`ticket_synced`, `ticket_failed`,
+     `ticket_retryable` ou `ticket_unknown`) na mesma transação e comitar.
+   - Se `RowsAffected()==0`, o processo perdeu o claim para o timeout de órfãos; abortar rollback.
 
-   O fluxo inicial passa `expected_state='new'`. O endpoint `/retry` passa
-   exclusivamente `expected_state='retryable_error'`; jamais aceita `new`,
-   `processing`, `unknown`, `synced` ou `failed`.
+### 7.4 Disputa de Retry (`POST /api/support/requests/{id}/retry`)
 
-7. Somente `RowsAffected()==1` insere `ticket_claimed` e commita. Falha do
-   evento faz rollback. Somente esse vencedor chama uma vez `CreateTicket`.
-8. Classificar o resultado e abrir transação final. Atualizar para
-   `synced|failed|retryable_error|unknown`, limpar token/início, preencher
-   `processed_at` e, no sucesso, ticket/href/`synced_at`, sempre com:
+- O endpoint `/retry` é restrito estritamente a solicitações em `retryable_error`.
+- O estado `unknown` é **proibido** e nunca aceita retry (exige reconciliação administrativa).
+- Para executar o retry, gera-se um novo `processing_token` e executa-se o CAS:
+  ```sql
+  UPDATE support_requests
+     SET sync_state='processing', processing_token=?,
+         processing_started_at=?, processed_at=0,
+         attempt_count=attempt_count+1, updated_at=?
+   WHERE id=? AND tenant_id=? AND sync_state='retryable_error' AND processing_token='';
+  ```
+- **Contrato de Disputa Concorrente:**
+  - **Vencedor (`RowsAffected()==1`):** insere evento `ticket_claimed`, comita, executa `CreateTicket`
+    fora de transação, finaliza via CAS e responde `202 Accepted` com os dados do request.
+  - **Perdedor (`RowsAffected()==0`):** retorna **`409 Conflict`** (`state_conflict`).
+  - O retry preserva `idempotency_key`, `external_id` e fingerprint originais.
 
-   ```sql
-   WHERE id=? AND tenant_id=? AND sync_state='processing'
-     AND processing_token=?
-   ```
-
-9. Exigir `RowsAffected()==1`, inserir o evento final na mesma transação e
-   commitar. Zero linhas impede processo/token antigo de concluir claim novo;
-   falha do evento reverte a mudança.
-
-O retry preserva `idempotency_key`, `external_id` e fingerprint. Chamadas
-concorrentes geram tokens distintos, mas só um CAS retorna uma linha; somente
-esse vencedor chama `CreateTicket`. Nenhum código chama `/retry` automaticamente.
-
-`attempt_count` conta claims autorizados para chamar `CreateTicket`; crash entre
-commit do claim e chamada pode supercontar, nunca subtrair nem provocar retry.
-
-### 7.4 Compatibilidade SQLite/MariaDB
+### 7.5 Compatibilidade SQLite/MariaDB
 
 O algoritmo usa apenas `INSERT`, `SELECT`, `UPDATE ... WHERE`, transações e
 `RowsAffected`, comuns aos dois drivers. Conflito é detectado pelo erro de
@@ -474,7 +521,8 @@ nos dois bancos.
 
 1. Revalidar `hostname` na fronteira HTTP, aplicar `TrimSpace` e
    `normalizeHostname`; não confiar em normalização do frontend.
-2. Na transação inicial, persistir request/evento em `new` com a seleção atual.
+2. Na transação inicial atômica (Passo 3 da seção 7.3), persistir o request já em
+   `processing` com a seleção local disponível.
 3. Se não houver hostname nem `device_binding_id`, seguir sem equipamento.
 4. Se houver binding, carregar por ID, exigir mesmo `tenant_id` e revalidar que
    seu hostname casa exatamente com o hostname informado.
@@ -483,9 +531,8 @@ nos dois bancos.
 6. Consultar GLPI por hostname exato e revalidar no domínio todos os hostnames
    retornados com `normalizeHostname`.
 7. Enriquecer `device_bindings` por `Upsert`, sem apagar IDs existentes.
-8. No claim, congelar `ticket_device_binding_id`, `ticket_hostname_*` e
-   `ticket_glpi_computer_id`; montar o contexto GLPI a partir desse snapshot.
-9. Somente o claim vencedor chama `CreateTicket`.
+8. Enriquecer o snapshot na Transação 2 condicionada ao `processing_token`.
+9. Somente o claim vencedor chama `CreateTicket` fora de transação.
 10. Persistir `glpi_ticket_id`/href somente após `201` válido.
 
 ### 8.2 Matriz de equipamento
@@ -509,28 +556,32 @@ nos dois bancos.
 Tactical offline é dado de domínio; Tactical indisponível é falha de integração.
 Nenhum caso executa script, reboot, terminal ou acesso remoto.
 
-### 8.3 Contexto textual e imutabilidade
+### 8.3 Contexto textual, imutabilidade e proteção XSS
 
-`description` permanece texto simples. Para `TicketInput.Content`, cada fragmento
-passa por `html.EscapeString`; quebras de linha viram `<br>`. O template usa
-exclusivamente o snapshot:
+`description` e `title` permanecem texto simples original tanto no banco de dados
+quanto nas respostas JSON da API, sem entidades HTML (como `&lt;`), evitando dupla
+codificação na renderização de texto do React. O frontend futuro é estritamente proibido
+de utilizar `dangerouslySetInnerHTML`.
+
+Para o campo `TicketInput.Content` enviado ao GLPI, cada fragmento textual controlado
+pelo usuário passa individualmente por `html.EscapeString` no servidor, e somente após o
+escape as quebras de linha `\n` são convertidas para `<br>`. O template estrutural é
+gerado exclusivamente pelo servidor usando o snapshot:
 
 ```text
-Descrição: <texto escapado>
-Equipamento informado: <ticket_hostname_informed escapado ou “não informado”>
-GLPI Computer ID: <ticket_glpi_computer_id validado ou “não confirmado”>
+Descrição: <html.EscapeString(req.Description) com \n -> <br>>
+Equipamento informado: <html.EscapeString(ticket_hostname_informed) ou “não informado”>
+GLPI Computer ID: <ticket_glpi_computer_id ou “não confirmado”>
 Vínculo nativo: indisponível na API v2.3; contexto textual
 Origem: WACalls
 Referência: <external_id>
 ```
 
-Nunca interpolar HTML bruto. O frontend futuro deve renderizar descrição como
-texto, nunca HTML não sanitizado ou `dangerouslySetInnerHTML`.
-
-Troca posterior altera apenas `device_binding_id`/`hostname_*` atuais e o evento;
-não altera `ticket_*`, o fingerprint ou o ticket GLPI já tentado/criado.
-Integração adicional por PATCH/followup fica para tarefa futura. A ausência de
-vínculo nativo Ticket↔Computer permanece contrato de D-015.
+Nunca interpolar HTML bruto. A troca posterior de equipamento (`PUT /device`) altera
+apenas `device_binding_id` e `hostname_*` atuais e gera auditoria; ela nunca altera
+`ticket_*` (snapshot congelado), o fingerprint ou o ticket GLPI já tentado/criado.
+Durante o estado `processing`, `PUT /device` responde `200 OK` com `glpiContextUpdated:false`,
+atualizando apenas a seleção local atual sem concorrer com o snapshot da tentativa em andamento.
 
 ## 9. Interfaces declaradas no consumidor
 
@@ -541,6 +592,7 @@ type supportGLPIClient interface {
     FindComputerByHostname(context.Context, string) (glpi.Computer, error)
     GetComputer(context.Context, string) (glpi.Computer, error)
     CreateTicket(context.Context, glpi.TicketInput) (glpi.CreatedTicket, error)
+    GetTicket(context.Context, string) (glpi.Ticket, error)
 }
 
 type supportTacticalClient interface {
@@ -549,8 +601,9 @@ type supportTacticalClient interface {
 }
 ```
 
-Não adicionar métodos a `internal/glpi`/`internal/tactical`. Não declarar
-`LinkComputerToTicket`, ticket update, followup, cache ou ação Tactical.
+O método `GetTicket` é adicionado ao `internal/glpi.Client` exclusivamente para
+viabilizar a reconciliação segura por `external_id`. Não declarar `LinkComputerToTicket`,
+ticket update, followup, cache ou ação destrutiva Tactical.
 
 ## 10. Endpoints mínimos
 
@@ -572,14 +625,7 @@ inalteradas.
   executou aquela ação, que pode ser diferente do criador.
 - Request/device de outro tenant retorna `404`. Recurso do mesmo tenant para
   conversa sem permissão retorna `403`, sem expor dados do recurso.
-- Inspeção factual: `user_permissions` persiste strings, `currentUser.Permissions`
-  é `[]string` e o endpoint admin aceita qualquer string não vazia. Porém nenhum
-  handler backend aplica permissão granular, não existe helper equivalente a
-  `HasPermission`, e o catálogo frontend não contém `support.reconcile`.
-- Portanto `support.reconcile` **não é capacidade existente end-to-end**. No MVP,
-  reconciliação e recovery administrativo exigem `currentUser.IsAdmin()`.
-  Permissão granular de reconcile fica para evolução futura com enforcement
-  backend e cadastro UI explícitos; T-005 não inventa esse caminho.
+- Reconciliação e recovery administrativo exigem `currentUser.IsAdmin()` no MVP.
 - ACL por Secretaria/Client/Site Tactical fica fora da T-005 e não bloqueia o
   MVP; o limite atual é tenant empresa + sessões atribuídas.
 
@@ -589,12 +635,12 @@ inalteradas.
 | `GET /api/support/devices?query=&limit=` | usuário autenticado; busca tenant-scoped | n/a | leitura |
 | `GET /api/support/devices/{id}` | binding do tenant | n/a | leitura |
 | `PUT /api/support/requests/{id}/device` | conversa acessível; request/binding do tenant | todos; não altera snapshot congelado | mesmo vínculo é no-op |
-| `POST /api/sessions/{sid}/chats/{jid}/support/ticket` | conversa acessível | cria `new`; pode finalizar síncrono | `Idempotency-Key` |
+| `POST /api/sessions/{sid}/chats/{jid}/support/ticket` | conversa acessível | cria `processing`; pode finalizar síncrono | `Idempotency-Key` |
 | `GET /api/support/requests/{id}` | request do tenant e conversa acessível | todos | leitura |
 | `POST /api/support/requests/{id}/retry` | atendente com conversa acessível; request do tenant | somente `retryable_error` | novo token/CAS; IDs preservados |
 | `POST /api/support/requests/{id}/reconcile` | somente admin; request do tenant | `unknown`; `processing` órfão | ação explícita |
 
-### 10.2 Formato comum e XSS
+### 10.2 Formato comum e respostas públicas
 
 Sucesso:
 
@@ -609,9 +655,9 @@ Erro público:
 ```
 
 Código/mensagem são allowlisted e nunca contêm URL, body ou erro externo.
-`retryAfterSeconds` só aparece quando positivo. Descrição e hostname são
-retornados como texto; o backend nunca retorna HTML montado para renderização.
-O frontend futuro deve usar text nodes, nunca HTML não sanitizado.
+`retryAfterSeconds` só aparece quando positivo (ex.: 429 retornado pelo GLPI).
+Descrição e hostname são retornados como texto simples puro; o backend nunca
+retorna entidades HTML escapadas no JSON. O frontend deve renderizar como text nodes.
 
 ### 10.3 `GET .../{jid}/support`
 
@@ -651,10 +697,13 @@ Body até 4 KiB:
   binding no mesmo tenant; outro tenant/ausente retorna `404`.
 - Atualizar somente `device_binding_id`, `hostname_informed/normalized` atuais e
   `updated_at`; `ticket_*` e fingerprint permanecem imutáveis após tentativa.
-- Estado `processing|synced|unknown|failed` aceita troca local, mas responde
-  `glpiContextUpdated:false`. Em `new`, só o fluxo inicial pode capturar o
-  vínculo; em `retryable_error`, o retry explícito captura o novo snapshot.
-- Alteração/evento são transacionais. Mesmo vínculo retorna `200` sem novo evento.
+- Estado `processing|synced|unknown|failed` aceita troca do vínculo local, mas responde
+  `200 OK` com `glpiContextUpdated: false`. Em `processing`, a alteração atualiza apenas a
+  seleção local atual e não concorre com a Transação 2 (que exige `processing_token` para
+  tocar em `ticket_*`), garantindo que o snapshot congelado da tentativa em andamento não seja
+  sobrescrito. Em `retryable_error`, uma troca posterior será capturada pelo próximo claim do retry.
+- Alteração/evento são transacionais (gravando `device_linked` ou `device_replaced`).
+  Mesmo vínculo atual retorna `200 OK` sem novo evento.
 - `200`; `400`; `401`; `403`; `404`; `409` concorrência; `422`; `503`.
 
 ### 10.7 `POST .../support/ticket`
@@ -681,12 +730,10 @@ rejeitados. Binding+hostname devem casar exatamente ou `422 device_mismatch`.
 Nunca aceitar `tenant_id`, `owner_id`, `actor_user_id`, permissões, `session_id`,
 `chat_jid`, `external_id`, fingerprint, estado ou timestamps no body.
 
-- Nova solicitação pode retornar `201 synced`, `202 unknown|retryable_error` ou
-  resposta terminal segura conforme seção 11.
-- Replay segue exatamente a tabela 7.1 e nunca cria claim.
-- `400`; `401`; `403`; `404`; `409`; `422`; `429`; `502`; `503`.
-- Resultado ambíguo retorna `202` com o mesmo request em `unknown`; não recomenda
-  retry.
+- Nova solicitação executa criação + claim atômico e pode retornar `201 synced`,
+  `202 unknown|retryable_error` ou resposta terminal segura conforme seção 11.
+- Replay segue exatamente a tabela 7.1 e nunca cria novo claim.
+- `400`; `401`; `403`; `404`; `409`; `422`; `502`; `503`.
 
 ### 10.8 `GET /api/support/requests/{id}`
 
@@ -701,16 +748,14 @@ mas o handler carrega por `(tenant_id,id)` e exige acesso à session/chat do
 request.
 
 - Permitido **somente** quando `sync_state='retryable_error'`.
-- `new`, `processing`, `unknown`, `synced` e `failed` retornam
-  `409 state_conflict`; `unknown` nunca usa esta rota.
+- `processing`, `unknown`, `synced` e `failed` retornam `409 state_conflict`;
+  `unknown` nunca aceita esta rota.
 - Gera novo `processing_token` aleatório e executa CAS com estado esperado
   exatamente `retryable_error`.
 - Não altera `Idempotency-Key`, `external_id` ou fingerprint.
-- Somente `RowsAffected()==1` chama `CreateTicket`; concorrência permite um POST.
-- O handler executa a tentativa no próprio request, sem worker, e responde `202`
-  quando o claim foi aceito, incluindo o estado resultante atual.
-- Claim perdedor/estado incompatível responde `409`; `401/403/404/429/502/503`
-  seguem a matriz comum.
+- **Disputa concorrente:** Vencedor do CAS (`RowsAffected()==1`) chama `CreateTicket`
+  fora de transação e responde `202`; perdedor do CAS (`RowsAffected()==0`)
+  responde `409 state_conflict`.
 - Nenhum scheduler, startup, replay ou outra rota aciona retry automaticamente.
 - `failed` só admite nova intenção com nova chave.
 
@@ -719,18 +764,28 @@ request.
 Body até 4 KiB; exige `currentUser.IsAdmin()`:
 
 ```json
-{"outcome":"synced","glpiTicketId":"77","glpiTicketHref":"/api.php/v2.3/Assistance/Ticket/77"}
+{"outcome":"synced","glpiTicketId":"77"}
 {"outcome":"safe_to_retry"}
 {"outcome":"processing_orphaned"}
 ```
 
-- `synced`: somente de `unknown`, com ID/href validados.
-- `safe_to_retry`: somente de `unknown`, após confirmação humana de ausência.
-- `processing_orphaned`: somente `processing` anterior ao cutoff; chama a mesma
-  rotina CAS da seção 6.2, sem contato externo.
-- Request de outro tenant/ausente retorna `404`; falta da permissão retorna
-  `403`; estado/token concorrente retorna `409`.
-- Estado/evento são transacionais e registram `actor_user_id`.
+- **`outcome == "synced"`:**
+  - Somente a partir de `unknown`.
+  - O backend **não confia** em href do body. Ele invoca `GetTicket(ctx, glpiTicketId)`
+    no GLPI (fora de transação).
+  - Se o ticket não existir no GLPI, retorna `404 not_found`.
+  - Confirma se `ticket.ExternalID == request.ExternalID`. Em caso de divergência,
+    retorna `422 validation_failed` (`reconcile_external_id_mismatch`).
+  - Obtendo confirmação exata, deriva `id` e `href` diretamente da resposta do GLPI.
+  - Executa CAS para transitar `unknown -> synced`, grava `reconciled_synced` e comita.
+- **`outcome == "safe_to_retry"`:**
+  - Somente a partir de `unknown`, após confirmação humana de ausência.
+  - Executa CAS para transitar `unknown -> retryable_error`, grava `reconciled_retryable` e comita.
+- **`outcome == "processing_orphaned"`:**
+  - Somente para solicitações em `processing` com `processing_started_at <= cutoff`.
+  - Não aceita ticket ID. Executa CAS para `unknown` e grava `processing_recovered_unknown`.
+  - Se a solicitação não atender ao cutoff ou o token/estado tiver mudado, retorna `409 state_conflict`.
+- Request de outro tenant/ausente retorna `404`; falta da permissão admin retorna `403`.
 - `200`; `400`; `401`; `403`; `404`; `409`; `422`; `503`.
 
 ## 11. Matriz de erros internos → HTTP
@@ -742,18 +797,19 @@ Body até 4 KiB; exige `currentUser.IsAdmin()`:
 | campo fora do limite | `validation_failed` | 422 | sem mutação |
 | auth ausente | `unauthorized` | 401 | sem mutação |
 | conversa do mesmo tenant sem acesso | `forbidden` | 403 | sem mutação |
-| reconciliação sem permissão | `forbidden` | 403 | sem mutação |
+| reconciliação sem permissão admin | `forbidden` | 403 | sem mutação |
 | recurso ausente/outro tenant | `not_found` | 404 | sem vazamento |
-| fingerprint diferente | `idempotency_key_reused` | 409 | linha original intacta |
-| estado/claim incompatível | `state_conflict` | 409 | sem mutação |
-| match múltiplo | `device_ambiguous` | 409 | sem vínculo automático |
-| rate limit comprovadamente anterior à criação | `rate_limited` | 429 | `retryable_error` se persistido |
+| ticket GLPI inexistente na reconciliação | `ticket_not_found` | 404 | mantém `unknown` |
+| external_id divergente no ticket GLPI | `reconcile_external_id_mismatch` | 422 | mantém `unknown` |
+| fingerprint diferente na mesma chave | `idempotency_key_reused` | 409 | linha original intacta |
+| estado/claim incompatível (ou disputa de retry) | `state_conflict` | 409 | sem mutação |
+| match múltiplo em equipamento | `device_ambiguous` | 409 | sem vínculo automático |
 | config local inválida após persistência | `integration_config_invalid` | 503 | `failed`, sem `CreateTicket` |
 | token transitório antes do ticket | `integration_unavailable` | 503 | `retryable_error` |
 | token/config permanentemente rejeitado | `integration_auth_failed` | 502 | `failed`, sem request de ticket |
 | `CreateTicket` retorna `400/403/409/404/422` válido | `ticket_rejected` | 502 | `failed` |
 | `CreateTicket` retorna `401` válido e corrigível | `integration_auth_failed` | 502 | `retryable_error` |
-| `CreateTicket` retorna `429` válido | `rate_limited` | 429 | `retryable_error` |
+| `CreateTicket` retorna `429` do GLPI | `rate_limited` | 429 | `retryable_error` |
 | leitura externa inválida | `integration_bad_response` | 502 | warning ou `failed` |
 | indisponibilidade em leitura | `integration_unavailable` | 503 | warning seguro |
 | transporte/timeout/cancelamento/`5xx`/sucesso inválido de `CreateTicket` | `ticket_result_unknown` | 202 | `unknown` |
@@ -772,6 +828,7 @@ classificar a resposta depois de chamar `CreateTicket` permanece `unknown`.
   `600`; cobre a operação inteira descrita na seção 6.2.
 - `WACALLS_SUPPORT_RECOVERY_MARGIN_SECONDS`: default `30`, mínimo `5`, máximo
   `300`; compõe `orphanAge=createTimeout+recoveryMargin`.
+- Horários sempre manipulados e persistidos em UTC.
 - Ausência usa default; parse inválido ou valor fora do intervalo falha no
   startup com `ErrConfig` seguro.
 - Flag false: schema local é criado para preservar dados; clientes externos não
@@ -801,12 +858,11 @@ classificar a resposta depois de chamar `CreateTicket` permanece `unknown`.
   Reconciliação e recovery administrativo exigem `IsAdmin()` no MVP.
 - Limites: key 128; requester 120; title 200; description 8.000; hostname 64;
   IDs locais 128; body de criação 16 KiB, retry 1 KiB e mutações 4 KiB.
-- Conteúdo GLPI escapa HTML; conteúdo local/API permanece texto simples.
+- Conteúdo GLPI escapa HTML individualmente por campo do usuário; conteúdo local/API
+  permanece texto simples puro. Proibição de `dangerouslySetInnerHTML` no frontend.
 - Nenhum erro externo bruto, URL, body, segredo ou header entra em API/log/store.
-- Rate limit de criação/retry: 10 novos claims por 60 segundos por
-  `(tenant_id, actor_user_id)`. Replay de leitura não consome; claim explícito
-  consome e retorna `Retry-After` ao exceder.
-- Idempotência continua garantida no banco; rate limit não a substitui.
+- Rate limiting in-memory por tenant fica deferido para hardening futuro; single-instance
+  e autenticação mitigam riscos no MVP.
 - Eventos append-only auditam criar, claim, resultado, vínculo, troca,
   recuperação e reconciliação com `actor_type`/`actor_user_id`.
 - CSRF mantém cookie `SameSite=Lax`, CORS same-origin e allowlist explícita.
@@ -820,6 +876,7 @@ classificar a resposta depois de chamar `CreateTicket` permanece `unknown`.
 Criar:
 
 ```text
+cmd/server/support_types.go
 cmd/server/supportstore.go
 cmd/server/supportstore_test.go
 cmd/server/support_integration.go
@@ -831,31 +888,33 @@ cmd/server/supportapi_test.go
 Alterar aditivamente:
 
 ```text
-cmd/server/server.go       # campos, store e clientes; sem worker
+cmd/server/server.go       # campos, store e clientes; sem worker; recuperação de órfãos no boot
 cmd/server/httpapi.go      # registerSupportRoutes + Idempotency-Key no CORS
 cmd/server/settingsapi.go  # somente features.support bool
+internal/glpi/client.go    # adição de GetTicket para reconciliação segura
+internal/glpi/types.go     # adição do DTO Ticket
 ```
 
-Não alterar `internal/glpi` ou `internal/tactical` salvo necessidade comprovada
-por contrato ausente; esta especificação não identifica nenhuma.
+Não alterar `internal/tactical` nem outros módulos de `internal/glpi` além das adições acima
+destinadas exclusivamente à reconciliação segura.
 
 ## 15. Sequência de implementação futura
 
-0. **Desbloquear antes de código T-005:** implementar e validar
-   `T-B002-HARNESS-MARIADB-STORES.md`.
-1. Depois do aceite da T-B002, fazer a revisão final deste contrato.
-2. Implementar DDL específico SQLite/MariaDB e executar a mesma suíte de
-   contrato nos dois bancos.
-3. Implementar store: criação/evento transacionais, conflito, replay, claim CAS,
-   finalização por token e recuperação auditada de órfãos.
-4. Cobrir concorrência entre conexões/processos e rollback de auditoria.
-5. Implementar interfaces/orquestrador com mocks; cobrir classificação GLPI e
-   snapshot de equipamento.
-6. Implementar handlers, autorização por conversa, reconcile/recovery admin,
-   limites, IDOR, rate limit e auditoria.
-7. Fazer wiring no boot e expor somente `features.support`.
-8. Executar validação completa SQLite/MariaDB, build e suíte offline; registrar
-   evidência na task/STATUS.
+0. **Pré-requisito concluído:** `T-B002-HARNESS-MARIADB-STORES.md` implementado e validado (`commit e4d3966`).
+1. Revisão final de especificação documental concluída. Aguardar autorização formal antes de iniciar código.
+2. Implementar DDL específico SQLite/MariaDB e executar suíte contratual de store nos dois bancos
+   (`support_types.go`, `supportstore.go`, `supportstore_test.go`).
+3. Implementar store: criação+claim atômicos em `processing` (eliminando requests presas em `new`),
+   replay de idempotência, enriquecimento condicionado ao token, CAS de retry e finalização, e recuperação
+   de órfãos no boot.
+4. Cobrir concorrência real entre processos/conexões independentes e atomicidade estrita com auditoria.
+5. Adicionar `GetTicket` em `internal/glpi/client.go` e struct `Ticket` em `internal/glpi/types.go` com validação de `external_id`.
+6. Implementar orquestrador (`support_integration.go`) com mocks; cobrir sanitização HTML individual/anti-dupla codificação,
+   classificação de erros GLPI e enriquecimento de snapshot.
+7. Implementar handlers (`supportapi.go`), autorização por conversa, endpoint de retry com disputa 409,
+   reconciliação administrativa com validação remota de `external_id`, recovery admin e PUT /device com `glpiContextUpdated: false`.
+8. Fazer wiring no boot (`server.go`), CORS (`httpapi.go`) e expor somente `features.support` (`settingsapi.go`).
+9. Executar validação completa SQLite/MariaDB, build e suíte offline; registrar evidências nos documentos de controle.
 
 Sem runner de retry em qualquer passo.
 
@@ -864,11 +923,16 @@ Sem runner de retry em qualquer passo.
 Todos offline quanto a GLPI/Tactical/WhatsApp, determinísticos e sem credenciais
 reais. MariaDB usa instância descartável exclusiva de teste.
 
-### Contrato de store — executar igualmente em SQLite e MariaDB
+#### Contrato de store — executar igualmente em SQLite e MariaDB
 
 - DDL sobe duas vezes, preserva dados, tipos, nullability, constraints e índices;
 - CRUD e todas as transições permitidas/proibidas;
-- criação de request e evento inicial é atômica;
+- criação de request e eventos iniciais (`created` + `ticket_claimed`) é atômica na mesma transação;
+- teste provando que não existe request permanentemente presa em `new`;
+- teste simulando queda/crash entre a persistência inicial e a chamada externa, comprovando que
+  `RecoverOrphanedProcessing` recupera a linha para `unknown` após o cutoff;
+- enriquecimento de snapshot na Transação 2 condicionado ao `processing_token`, abortando se o claim
+  tiver sido perdido;
 - mudança de estado/snapshot/equipamento e evento é atômica;
 - falha injetada ao inserir evento causa rollback integral;
 - eventos são append-only e registram `actor_type`/`actor_user_id`;
@@ -893,11 +957,14 @@ reais. MariaDB usa instância descartável exclusiva de teste.
   claim/CAS vencedor executa `CreateTicket`;
 - token/config antes da operação classifica `failed|retryable_error` sem unknown;
 - `400/403/409` HTTP válido de `CreateTicket` termina `failed`;
-- rate limit seguro termina `retryable_error` e preserva `Retry-After`;
+- resposta HTTP 429 do GLPI termina `retryable_error` e preserva `Retry-After`;
 - transporte/timeout/cancelamento/5xx/sucesso inválido termina `unknown`;
 - replay e retry explícito em `unknown` nunca executam segundo POST;
 - `external_id` tem formato exato, determinístico e não sensível;
 - fingerprint v2 cobre presença/normalização de todos os campos semânticos;
+- sanitização e proteção XSS: teste com tags HTML (`<script>`, `<div>`), `&`, aspas e quebras de linha
+  (`\n` para `<br>`), prevenindo injeção e evitando dupla codificação;
+- cliente GLPI `GetTicket` busca ticket por ID e retorna `Ticket{ID, ExternalID}`;
 - device binding encontrado, ausente, conflitante e de outro tenant;
 - Tactical encontrado, offline, indisponível e ambíguo;
 - GLPI encontrado, ausente, indisponível e ambíguo;
@@ -909,15 +976,23 @@ reais. MariaDB usa instância descartável exclusiva de teste.
 - rotas novas sem alterar chat;
 - request, device e conversa de outro tenant retornam `404`;
 - usuário do mesmo tenant sem acesso à conversa recebe `403`;
-- atendente comum cria ticket e pode retry de `retryable_error` na conversa
-  autorizada;
+- atendente comum cria ticket e pode retry de `retryable_error` na conversa autorizada;
 - atendente comum vincula/troca binding do mesmo tenant;
 - tenant/owner/actor/permissões enviados no body são rejeitados;
 - usuário não-admin não reconcilia nem força recovery de `processing`;
-- admin reconcilia `unknown` e recupera órfão anterior ao cutoff;
-- retry aceito responde `202`; `new`, `processing`, `unknown`, `synced` e
-  `failed` respondem `409` sem chamar GLPI;
-- dois retries concorrentes produzem um CAS vencedor e um único POST;
+- disputa concorrente no `/retry`: vencedor do CAS executa e responde `202`, perdedor responde `409 state_conflict`;
+- `POST /retry` em qualquer estado diferente de `retryable_error` (`processing`, `unknown`, `synced`, `failed`)
+  responde `409 state_conflict` sem chamar GLPI;
+- reconciliação segura (`POST /reconcile` com `outcome=synced`):
+  - ticket GLPI existente e com `external_id` correspondente -> transiciona `unknown -> synced` e deriva ID/href oficiais da resposta do GLPI;
+  - teste de href arbitrário/malicioso no payload -> comprova que href do usuário é ignorado e derivado com segurança;
+  - ticket GLPI com `external_id` divergente -> responde `422 validation_failed` (`reconcile_external_id_mismatch`) e mantém `unknown`;
+  - ticket GLPI inexistente -> responde `404 ticket_not_found` e mantém `unknown`;
+- recuperação administrativa `outcome=processing_orphaned`:
+  - solicitação em `processing` com `processing_started_at <= cutoff` -> CAS para `unknown` e responde `200`;
+  - solicitação em `processing` anterior ao cutoff (`processing_started_at > cutoff`) ou com token alterado -> responde `409 state_conflict`;
+  - rejeita qualquer ticket ID/href enviado;
+- `PUT /device` durante `processing`: responde `200 OK` com `glpiContextUpdated: false`, altera apenas seleção local e não interfere no snapshot congelado;
 - limites de body/campos/key, campo desconhecido e HTML hostil;
 - criação `201`, replay por estado `200/202`, conflito `409`;
 - matriz `400/401/403/404/409/422/429/502/503`;
@@ -935,8 +1010,8 @@ uma chamada registrada pelo mock compartilhado.
 ## 17. Comandos de validação futura
 
 ```text
-gofmt -l cmd/server/support*.go cmd/server/server.go cmd/server/httpapi.go cmd/server/settingsapi.go
-go vet ./cmd/server/...
+gofmt -l cmd/server/support*.go cmd/server/server.go cmd/server/httpapi.go cmd/server/settingsapi.go internal/glpi/*.go
+go vet ./cmd/server/... ./internal/glpi/...
 go test ./cmd/server/ -run 'Support.*SQLite' -count=1
 go test ./cmd/server/ -run 'Support.*MariaDB' -count=1
 go test ./cmd/server/ -run 'Support.*Concurrent|Support.*Recovery|Support.*Audit' -count=20
@@ -952,26 +1027,26 @@ CGO/gcc. Nunca chamar GLPI, Tactical ou WhatsApp real.
 
 ## 18. Critérios de aceite
 
-1. DDL e suíte equivalente passam em SQLite e MariaDB; sem isso T-005 não termina.
-2. Tipos, tamanhos, nullability, índices e uniques seguem a seção 4.
-3. Request/evento e toda mudança/evento são atomicamente persistidos.
-4. Toda criação exige chave válida e persiste antes de operação externa.
-5. Replay segue o estado; nunca cria claim implícito.
-6. Mesma chave/fingerprint retorna o mesmo request; diferente retorna `409`.
-7. Concorrência entre processos/conexões permite uma linha, um claim e um POST.
-8. Token antigo não finaliza claim recuperado ou substituído.
-9. Falha pré-ticket classifica `failed|retryable_error`; ambígua vira `unknown`.
-10. `unknown` nunca repete e só sai por reconciliação autorizada.
-11. Recuperação de órfão é explícita, por cutoff, idempotente e auditada.
-12. Atendente comum cria/vincula em conversa autorizada, sem acesso transversal.
-13. Reconcile e recovery administrativo exigem `IsAdmin()` no MVP.
-14. Tenant/owner/actor/permissões nunca vêm do body; IDOR é coberto.
-15. Hostname casa por igualdade normalizada e snapshot não muda retroativamente.
-16. GLPI recebe texto escapado; não há vínculo Ticket↔Computer nativo.
-17. Tactical permanece somente leitura; indisponibilidade não quebra o chat.
-18. Limites, rate limit, redaction, XSS, auditoria e flag são cobertos.
-19. Rotas/modelo de chat, Flow Builder, portal e SSE permanecem inalterados.
-20. Build/suítes passam offline e nenhuma chamada externa real ocorre.
+1. DDL e suíte contratual passam 100% em SQLite e MariaDB usando o harness descartável da T-B002.
+2. Tipos, tamanhos, nullability, índices e uniques seguem a seção 4; `SQLDialect` explícito (`DialectSQLite` em produção; proibição de importar `internal/testdb` em código de produção).
+3. Criação atômica (create+claim na mesma transação com `created` e `ticket_claimed`), provando em teste que não existe request permanentemente presa em `new`.
+4. Enriquecimento de snapshot na Transação 2 condicionado estritamente ao `processing_token`, abortando se o claim tiver sido perdido.
+5. Replay de criação segue a tabela 7.1; requisições concorrentes com mesma chave/fingerprint são serializadas e respondem `202`, nunca `state_conflict`.
+6. Mesma chave com fingerprint divergente retorna `409 idempotency_key_reused`.
+7. Disputa no `/retry` resolvida por CAS: vencedor executa e responde `202`; perdedor recebe `409 state_conflict` sem efetuar segundo POST.
+8. Queda simulada de processo entre persistência e chamada externa é coberta por `RecoverOrphanedProcessing` no boot e recovery administrativo, respeitando cutoff (`orphanAge`).
+9. Falha de validação/autenticação pré-ticket classifica `failed|retryable_error`; ambiguidade após chamada `CreateTicket` transita para `unknown`.
+10. `unknown` nunca repete automaticamente e só transiciona por reconciliação administrativa autorizada (`IsAdmin()`).
+11. Reconciliação com `outcome=synced` invoca `GetTicket` no GLPI (confirmado pelo OpenAPI v2.3 em `/Assistance/Ticket/{id}` com schema `Ticket`), confirma existência e igualdade estrita de `external_id`; divergência retorna `422 reconcile_external_id_mismatch`.
+12. Reconciliação rejeita/ignora href arbitrário enviado no payload e deriva ID e href oficiais estritamente da resposta do GLPI (coberto com teste de href malicioso).
+13. Recuperação administrativa `outcome=processing_orphaned` exige `IsAdmin()`, rejeita ticket ID e só recupera se `processing_started_at <= cutoff`, retornando `409` em caso de concorrência ou cutoff não atingido.
+14. Atendente comum cria, consulta e vincula/troca equipamento apenas em conversa autorizada; IDOR e tentativas de injetar tenant/owner/permissões via body são bloqueadas.
+15. `PUT /device` durante `processing` altera apenas seleção local, responde `200` com `glpiContextUpdated: false`, não altera snapshot congelado e não concorre com enriquecimento.
+16. Conteúdo GLPI (`TicketInput.Content`) passa por escape individual com `html.EscapeString` para cada campo do usuário antes de converter `\n` para `<br>`; coberto com testes contra tags HTML, &, aspas e dupla codificação; proibição de `dangerouslySetInnerHTML`.
+17. Tactical permanece estritamente somente leitura; indisponibilidade não quebra a criação do ticket.
+18. Rate limiting in-memory por tenant fica explicitamente fora da T-005 (transferido para hardening futuro); cliente GLPI continua tratando 429 externo com `retryable_error` e preservando `Retry-After`.
+19. Rotas/modelo de chat, Flow Builder, portal e SSE permanecem rigorosamente inalterados.
+20. Build, vet e suítes completas rodam offline sem credenciais reais ou chamadas de rede externas.
 
 ## 19. Bloqueio, riscos e dúvidas restantes
 
@@ -986,18 +1061,20 @@ CGO/gcc. Nunca chamar GLPI, Tactical ou WhatsApp real.
 - Criação é síncrona; retry somente explícito; sem cache/worker/SSE.
 - Resultado `CreateTicket` ambíguo exige reconciliação (D-016).
 
-### Bloqueio obrigatório antes do código
+### Status dos bloqueios
 
-A infraestrutura atual e os stores inspecionados têm testes automatizados apenas
-em SQLite; não existe teste MariaDB. A T-005 está bloqueada por
-`T-B002-HARNESS-MARIADB-STORES.md`. A ordem obrigatória é: aceite da T-B002,
-revisão final deste contrato e somente então implementação T-005. Homologação
-manual não substitui esse aceite.
+- **Harness MariaDB (T-B002):** CONCLUÍDO e aceito (`commit e4d3966`). O harness
+  descartável (`test/mariadb/compose.yml`, `internal/testdb` e scripts de teste) está
+  disponível e validado para apoiar os testes contratuais da T-005.
+- **Implementação T-005:** BLOQUEADA aguardando autorização explícita. Não implementar
+  código runtime nem realizar push até aprovação formal.
 
 ### Dúvidas não bloqueantes para o backend mínimo
 
-1. Existe busca GLPI operacional confiável por `external_id`? Sem ela,
-   reconciliação continua manual; isso jamais autoriza retry automático.
+1. Existe busca GLPI operacional confiável por `external_id`?
+   - O OpenAPI oficial GLPI v2.3 (`GET /Assistance/Ticket/{id}`) confirmou que o DTO
+     `Ticket` retorna `external_id`, viabilizando a validação pontual de integridade no
+     reconcile. Uma busca indexada reversa não é necessária no MVP.
 2. Qual integração futura refletirá troca pós-criação no GLPI: PATCH, followup ou
    nenhuma? T-005 mantém somente estado/auditoria local.
 
@@ -1017,7 +1094,11 @@ manual não substitui esse aceite.
 
 ## 21. Estado deste documento
 
-Revisão documental concluída em 2026-09-12; ainda não aprovada para implementação
-ou push. Nenhum Go, TypeScript, schema runtime ou env foi alterado. Próximo passo
-exato: disponibilizar e validar o harness MariaDB automatizado; depois revisar e
-aprovar este contrato antes de iniciar qualquer código T-005.
+Revisão documental concluída e finalizada em 2026-09-12 com todas as decisões aprovadas
+incorporadas (single-instance, ausência de rate limiter in-memory na T-005, disputa 409
+no retry, escape seguro de HTML no GLPI, create+claim atômicos eliminando request presa em
+new, reconciliação segura via GetTicket validando external_id contra spoofing, recuperação
+administrativa condicionada a cutoff e isolamento de dialeto).
+T-B002 aprovada e concluída. Implementação da T-005 pronta para ser iniciada assim que
+houver autorização explícita. Nenhum código de produção ou teste de runtime foi alterado
+nesta etapa. Push bloqueado até autorização.

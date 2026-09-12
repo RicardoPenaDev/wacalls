@@ -2,16 +2,16 @@
 
 Atualizado em: 2026-09-12
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa atual: `T-B002` — concluída. T-005 pronta para revisão final de contrato (implementação não iniciada).
+Tarefa atual: `T-005` — especificação finalizada e aprovada; implementação não iniciada.
 `T-005` permanece não iniciada; implementação e push não autorizados.
 
 ## Objetivo imediato
 
-Fazer a revisão final da especificação `docs/tasks/T-005-SUPPORT-REQUESTS-API-WIRING.md`
-e aguardar autorização antes de iniciar qualquer código runtime ou push.
+Aguardar autorização explícita para iniciar a implementação do código da `T-005`
+(`support_types.go`, `supportstore.go`, DDL SQLite/MariaDB e testes contratuais).
 
 ```text
-revisão final T-005 → autorização explícita → implementação T-005
+revisão final T-005 concluída → autorização explícita → implementação T-005
 ```
 
 ## Concluído
@@ -22,91 +22,74 @@ revisão final T-005 → autorização explícita → implementação T-005
 - `T-003` — normalização de hostname e store `device_bindings`, com SQLite.
 - `T-004` — clientes `internal/glpi` e `internal/tactical`, testes offline.
 - `chore` — `.gitattributes` multiplataforma com política explícita de EOL.
-- `T-B002` — harness MariaDB descartável (`test/mariadb/compose.yml`, `internal/testdb`, `scripts/test-store-contracts.{sh,ps1}`); validado 100% em SQLite (PowerShell Windows e Bash macOS) e MariaDB 11.4 (Bash macOS); cleanups de sucesso e falha comprovados.
+- `T-B002` — harness MariaDB descartável (`test/mariadb/compose.yml`, `internal/testdb`, `scripts/test-store-contracts.{sh,ps1}`); validado 100% em SQLite e MariaDB 11.4; cleanups de sucesso e falha comprovados (commit `e4d3966`).
+- `T-005 (especificação)` — plano de implementação finalizado, com decisões D-017 e D-018 integradas.
 
 ## Ainda falta
 
-- Fazer a revisão final do contrato T-005 após o aceite da T-B002.
-- Implementar T-005 somente após autorização explícita.
+- Autorização explícita para iniciar código da T-005.
+- Implementar T-005 (store, orquestrador, API e wiring).
 
 ## Contratos fechados para T-005
 
-### Retry formal
+### Criação atômica e eliminação de `new` órfão
+- `StateNew` não é estado persistente; `sync_state` grava diretamente `processing`.
+- Inserção inicial, `processing_token`, `processing_started_at` e eventos `created` + `ticket_claimed` são comitados na mesma transação atômica.
+- Elimina requests presas em `new`; qualquer interrupção de processo é coberta por `RecoverOrphanedProcessing`.
+- Enriquecimento de snapshot na Transação 2 condicionado estritamente ao `processing_token`.
 
+### Disputa concorrente no `/retry`
 - `POST /api/support/requests/{id}/retry` aceita somente `retryable_error`.
-- Atendente comum pode executar quando tenant e conversa forem acessíveis.
-- `new`, `processing`, `unknown`, `synced` e `failed` retornam `409`; não há POST
-  GLPI nesses estados.
-- Cada retry gera novo `processing_token` e disputa CAS; somente
-  `RowsAffected()==1` chama GLPI.
-- `Idempotency-Key`, `external_id` e fingerprint são preservados.
-- Sucesso de aceite responde `202`. Não existe retry automático; `unknown`
-  requer reconciliação.
+- `unknown`, `processing`, `synced` e `failed` respondem `409 state_conflict`; nenhum segundo POST.
+- Vencedor do CAS (`RowsAffected()==1`) executa `CreateTicket` e responde `202`. Perdedor responde `409 state_conflict`.
 
-### Permissões
+### Reconciliação segura e validação de `external_id`
+- `POST /api/support/requests/{id}/reconcile` com `outcome=synced` exige `currentUser.IsAdmin()`.
+- Rota `GET /Assistance/Ticket/{id}` confirmada no OpenAPI GLPI v2.3; adicionado `GetTicket` em `internal/glpi`.
+- Backend consulta o GLPI fora de transação, valida que o ticket existe e confirma igualdade estrita de `external_id`.
+- Rejeita href do body; deriva ID e href oficiais estritamente da resposta do GLPI.
+- Divergência retorna `422 validation_failed` (`reconcile_external_id_mismatch`) e mantém `unknown`.
 
-- `user_permissions` persiste strings e `currentUser.Permissions` é `[]string`.
-- O backend não tem enforcement granular/`HasPermission`, e o catálogo frontend
-  não contém `support.reconcile`.
-- Logo, reconcile e recovery administrativo exigem `currentUser.IsAdmin()` no
-  MVP. `support.reconcile` fica para evolução futura completa de backend + UI.
+### Recuperação administrativa de órfão
+- `outcome=processing_orphaned` exige `IsAdmin()` e aceita apenas solicitações com `processing_started_at <= cutoff`.
+- Rejeita ticket ID; transiciona via CAS para `unknown` e grava `processing_recovered_unknown`. Divergência retorna `409`.
 
-### Instâncias e recovery
+### Sanitização HTML e proteção XSS
+- Banco e JSON armazenam texto original puro (sem entidades HTML como `&lt;`). Proibido `dangerouslySetInnerHTML` no frontend.
+- `TicketInput.Content` escapa individualmente cada campo do usuário com `html.EscapeString` antes de converter `\n` para `<br>`.
 
-- A implantação atual tem um container WACalls, SQLite local/pool de uma conexão
-  e estado de broker/sessões/rate limit em memória; não há lease ou coordenação.
-- MVP exige uma única instância ativa por implantação (D-017).
-- O claim grava `processing_started_at` em UTC.
-- `createTimeout`: default 120 s, mínimo 30, máximo 600.
-- `recoveryMargin`: default 30 s, mínimo 5, máximo 300.
-- `orphanAge=createTimeout+recoveryMargin`;
-  `cutoff=time.Now().UTC().Add(-orphanAge).Unix()`.
-- Startup, após schema e antes das rotas de suporte, recupera somente
-  `processing_started_at<=cutoff` por CAS. Leitura nunca altera estado.
-- Sem heartbeat. A rota administrativa reutiliza a rotina e exige `IsAdmin()`.
+### Instâncias, timeouts e rate limit
+- Single-instance obrigatório no MVP (D-017); horários em UTC.
+- `createTimeout`: default 120s (30–600s); `recoveryMargin`: default 30s (5–300s); `orphanAge=createTimeout+recoveryMargin`.
+- Rate limiting in-memory por tenant postergado para hardening futuro (removido da T-005); 429 do GLPI vira `retryable_error`.
+
+### Dialeto e integridade de produção
+- `SQLDialect` explícito (`DialectSQLite` em runtime de produção).
+- Proibição estrita: código de produção (`cmd/server`) NUNCA deve importar `internal/testdb`.
+
+### Vínculo de equipamento durante processamento
+- `PUT /device` durante `processing` responde `200 OK` com `glpiContextUpdated: false`, altera apenas seleção local e não toca no snapshot `ticket_*`.
 
 ## Bloqueios
 
-- Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; T-005 mantém
-  contexto textual.
+- Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; T-005 mantém contexto textual.
 - `conversation_id`: fora do MVP; bloqueia somente o portal futuro.
-- T-005: implementação bloqueada até autorização explícita.
-
-## Escopo da T-B002
-
-- MariaDB 11.4 descartável, isolado, credenciais efêmeras e porta loopback.
-- Mesma suíte de contrato SQLite/MariaDB: schema, transação, unique, conflito,
-  CAS/`RowsAffected`, concorrência, rollback e cleanup.
-- Scripts local/CI com readiness e timeouts; nenhum GLPI/Tactical real.
-- Não implementar `support_requests` na T-B002.
-
-## Validação registrada
-
-- T-B002: `gofmt -l` limpo; `go vet ./internal/testdb/...` → **OK**;
-  `bash scripts/test-store-contracts.sh all` (macOS) → **100% PASS** (SQLite 0.30s, MariaDB 0.25s);
-  `pwsh -NoProfile -File .\scripts\test-store-contracts.ps1 -Backend sqlite` (Windows) → **100% PASS** (SQLite 0.64s; MariaDB não executado no Windows por Docker indisponível, já validado no macOS);
-  Cleanup após sucesso comprovado (`docker ps/volume/network ls` limpos no Mac);
-  Cleanup após falha comprovado via `WACALLS_TEST_SIMULATE_FAILURE=true` (exit code 1, zero recursos órfãos no Mac);
-  `go test ./internal/testdb/... -count=10` → **OK**;
-  `go build ./...` e `go test ./...` → **100% PASS**;
-  `git diff --check origin/main..HEAD` → **OK**.
-- Race detector não executado: CGO desabilitado e `gcc` ausente.
+- Implementação T-005: bloqueada até autorização formal.
 
 ## Estado Git do checkpoint
 
-- Branch `main` à frente de `origin/main` pelo commit da T-B002 (aguardando push).
-- Nenhum merge ou rebase pendente.
-- Nenhum push realizado.
+- Branch `main` em dia com `origin/main`.
+- Documentação revisada pronta para commit local.
+- Nenhum push realizado ou autorizado.
 
 ## Próximo passo
 
-Revisão final da especificação T-005 (`docs/tasks/T-005-SUPPORT-REQUESTS-API-WIRING.md`) e aguardar autorização antes de qualquer código T-005 ou push.
+Aguardar autorização formal para iniciar a implementação da `T-005` (`support_types.go`, `supportstore.go` e testes de contrato SQLite/MariaDB).
 
 ## Ambiente preservado
 
 - Windows 11 x64.
-- Go 1.26.4 portátil fora do repositório; caches em
-  `D:/fabrica/WaCalls/toolchains/`.
+- Go 1.26.4 portátil fora do repositório; caches em `D:/fabrica/WaCalls/toolchains/`.
 - Nenhuma credencial real no repositório.
 
 ## Não tocar nesta etapa
@@ -114,4 +97,4 @@ Revisão final da especificação T-005 (`docs/tasks/T-005-SUPPORT-REQUESTS-API-
 - `client/`, portal/agente Windows e Flow Builder;
 - rotas existentes de `messageapi.go` e modelo `(session_id, chat_jid)`;
 - automação remota Tactical, retry automático ou worker GLPI;
-- API legada GLPI, chamadas externas reais ou vínculo nativo Ticket↔Computer.
+- chamadas externas reais ou código runtime até autorização.

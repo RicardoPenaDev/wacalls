@@ -2,54 +2,43 @@
 
 Atualizado em: 2026-09-13
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa atual: `T-007` — Etapa 7.1 concluída com sucesso (suíte Go global 100% verde).
+Tarefa atual: `T-007` — Etapa 7.1 publicada; Etapa 7.2 corrigida localmente após auditoria final (achado de sanitização de URL corrigido), aguardando nova auditoria read-only.
 
-## Objetivo imediato
+## Checkpoint de Passagem (Transição de IA)
 
-Aguardar autorização formal do usuário para iniciar a execução da Etapa 7.2 da T-007 (hardening do link GLPI).
+- **T-007 Etapa 7.1:** Concluída e publicada em `origin/main` (teste determinístico de expiração de licença).
+- **T-007 Etapa 7.2:** Implementada e corrigida localmente no commit atual:
+  - O commit inicial `62f4fce` foi **reprovado na auditoria** devido ao uso indevido de `WACALLS_GLPI_INSECURE_TLS` no código Go e problemas de normalização de portas no origin matching; corrigido via `git commit --amend`.
+  - A auditoria final seguinte identificou que `sanitizeGLPIWebUrl` (frontend) não rejeitava hash/fragmento, parâmetros de query adicionais nem `id` duplicado, apesar de a especificação declarar essa proteção como atendida; **corrigido** nesta rodada (ver `client/src/lib/supportUrl.ts`).
+  - `WACALLS_GLPI_INSECURE_TLS` foi **removida completamente** do código executável e da documentação técnica.
+  - Protocolo HTTP é **rejeitado incondicionalmente** para `WACALLS_GLPI_WEB_BASE_URL`, inclusive em `localhost`, `127.0.0.1` e `[::1]`. **Isso não se aplica a `WACALLS_GLPI_BASE_URL`** (URL base da API GLPI, herdada da T-004), que continua aceitando `http` ou `https` — restrição pré-existente, fora do escopo desta etapa.
+  - TLS permanece 100% verificado; sem flag nem opção para `InsecureSkipVerify`.
+  - Comparação de origem (`matchGLPIOrigins`) considera esquema, hostname normalizado (com suporte a IPv6 e case-insensitive) e porta efetiva.
+  - HTTPS sem porta e HTTPS `:443` são **rigorosamente equivalentes**.
+  - Portas não padrão divergentes são estritamente rejeitadas.
+  - `WACALLS_GLPI_WEB_BASE_URL` continua **opcional**.
+  - Quando ausente, a ação "Abrir no GLPI" fica oculta e o botão "Copiar número" continua disponível.
+  - `glpiTicketHref` permanece estritamente interno; o DTO público e o frontend recebem apenas `webUrl` sanitizada.
+  - `sanitizeGLPIWebUrl` (frontend) exige protocolo `https:`, ausência de userinfo, pathname exato `/front/ticket.form.php`, hash/fragmento vazio e exatamente um único parâmetro de query chamado `id` com valor decimal positivo canônico; hash, parâmetros adicionais (mesmo vazios) e `id` duplicado são rejeitados, retornando `null` sem lançar exceção.
+  - Validações completas aprovadas: `gofmt` limpo, `go vet` limpo, 50 repetições de `Support|GLPI` 100% aprovadas, `npm test` 10/10, `npm run build` aprovado, `go build ./...` e `go test -count=1 ./...` globais aprovados.
+  - Working tree estava 100% limpa antes deste checkpoint.
+- **T-007 Etapa 7.3:** **NÃO iniciada**.
+- **Push:** **Nenhum push da Etapa 7.2 foi realizado**.
 
-```text
-T-005 backend (publicado) → T-006 frontend (publicado) → T-007 (Etapa 7.1 concluída → Etapa 7.2 pendente de autorização)
-```
+## Decisões Arquiteturais
 
-## Concluído
+- **D-019:** Avaliação de arquitetura de rate limiting mantida em aberto como **proposta** para a Etapa 7.5 (sem implementação antecipada).
+- **D-020:** Hardening do link web do GLPI (Opção A restrita) **aceita** e implementada.
 
-- `T-001` — Inventário e baseline do código.
-- `T-002` — Plano técnico do slice (decisões D-013/D-014).
-- `T-B001` — Recuperação do pacote `internal/voip/media`.
-- `T-003` — Normalização de hostnames e store `device_bindings` (SQLite/MariaDB).
-- `T-004` — Clientes HTTP `internal/glpi` e `internal/tactical` com testes offline.
-- `T-B002` — Harness de teste MariaDB descartável.
-- `T-005` — Backend de suporte GLPI + Tactical completo (publicado em `origin/main`).
-- `T-006` — Frontend do Painel de Suporte completo e validado em mocks (publicado em `origin/main`).
-- `T-007 (Planejamento)` — Especificação formal em `docs/tasks/T-007-HOMOLOGACAO-HARDENING-DEPLOY.md`.
-- `T-007 (Etapa 7.1 — Teste de Licença Determinístico)`:
-  - Causa confirmada: drift de relógio de parede entre definição da tabela e execução dos subtestes somado ao truncamento da divisão inteira de segundos (`/ 86400`).
-  - Correção aplicada: injeção de clock controlável `licenseNow` (`var licenseNow = time.Now`), captura de instante único (`now := licenseNow()`) por operação composta (`licenseStatus`, `renewLicense`, `checkLicense`) via helpers `verifyLicenseAt` e `diasParaVencerAt`, eliminando janelas de drift ou inconsistência.
-  - Mock e isolamento: helpers `mockLicenseClock` e `mockLicenseFlagPath` com restauração automática via `t.Cleanup`; garantia de proibição de `t.Parallel` em testes que mutam estado global de pacote.
-  - Remoção de fallback de fuso: `TestLicenseStatusTimezonesUTCeSP` exige timezone nativo `America/Sao_Paulo` com `t.Fatalf` em caso de erro, sem fallback para `FixedZone`.
-  - Testes adicionados: limites exatos e instantes adjacentes (`TestLicenseStatusLimitesEInstantes`), virada de dia/mês/ano/bissexto (`TestLicenseStatusViradaDeDiaEData`), consistência UTC vs America/Sao_Paulo (`TestLicenseStatusTimezonesUTCeSP`) e comprovação de consulta única ao relógio (`TestLicenseStatusConsultaRelogioUmaUnicaVez`).
-  - Validação: `go test ./...` 100% verde em todos os pacotes; `go test ./cmd/server -run '^TestLicense' -count=100` sem flakes.
+## Bloqueios e Próximos Passos Obrigatórios
 
-
-## Decisões Pendentes
-
-- **Estratégia de Navegação do Link GLPI (Etapa 7.2):** Deliberação entre Opção A (backend valida contra `WACALLS_GLPI_BASE_URL`), Opção B (backend retorna ID e frontend resolve base segura) ou Opção C (remover ação e manter apenas ID textual; fallback seguro até confirmação de interface web vs API JSON).
-- **Arquitetura de Rate Limiting (Etapa 7.5):** Proposta D-019 mantida em aberto como estudo comparativo (Reverse Proxy vs Middleware Persistente vs Idempotency-Key/CAS atual), sem implementação antecipada.
-
-## Bloqueios e Pendências
-
-- **Autorização Prévia Mandatória:** Nenhuma alteração em código de produção, testes ou infraestrutura pode ser executada sem autorização explícita prévia para cada etapa.
-- **Etapa 7.2:** Hardening do link GLPI aguardando autorização para iniciar.
-- **Homologação Real (Etapa 7.4):** Dependente de autorização imediata e credenciais de ambiente para a Etapa 7.4.
-
-## Próximo Passo
-
-- Aguardar autorização formal do usuário para iniciar a **Etapa 7.2** da T-007 (hardening do link GLPI).
+1. **Próxima Ação Obrigatória:** Auditoria técnica final **READ-ONLY** do commit corrigido antes de autorizar push.
+2. Após aprovação formal e publicação da Etapa 7.2 via push em `origin/main`, planejar e executar a **Etapa 7.3** (suíte E2E permanente).
+3. **Instrução para a próxima IA:** Ler obrigatoriamente `AGENTS.md`, `docs/STATUS.md`, `docs/DECISIONS.md` e `docs/tasks/T-007-HOMOLOGACAO-HARDENING-DEPLOY.md` antes de qualquer ação.
 
 ## Estado Git
 
-- T-005: Concluída e publicada em `origin/main`.
-- T-006: Concluída e publicada em `origin/main`.
-- T-007: Etapa 7.1 concluída localmente; Etapa 7.2 não iniciada.
+- Baseline: `origin/main` = `559cc53789e4a20a34126b41f545347ff4947c02`
+- HEAD: 1 commit à frente de `origin/main` (Etapa 7.2 amend).
+- Working tree: Limpa.
 - Push: Não realizado.

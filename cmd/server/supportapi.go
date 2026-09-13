@@ -30,6 +30,14 @@ func (s *server) isTacticalEnabled() bool {
 	return s != nil && s.tacticalClient != nil
 }
 
+func (s *server) toPublicSupportRequestDTO(r *SupportRequest) SupportRequestPublicDTO {
+	webBase := ""
+	if s != nil && s.supportCfg != nil {
+		webBase = s.supportCfg.GLPIWebBaseURL
+	}
+	return toPublicSupportRequestDTO(r, webBase)
+}
+
 func isValidIdempotencyKey(k string) bool {
 	return ValidateIdempotencyKey(k) == nil
 }
@@ -114,7 +122,7 @@ func (s *server) handleGetChatSupport(w http.ResponseWriter, r *http.Request) {
 
 	var dtos []SupportRequestPublicDTO
 	for _, req := range requests {
-		dtos = append(dtos, toPublicSupportRequestDTO(req))
+		dtos = append(dtos, s.toPublicSupportRequestDTO(req))
 	}
 	if dtos == nil {
 		dtos = []SupportRequestPublicDTO{}
@@ -276,7 +284,7 @@ func (s *server) handleCreateChatSupportTicket(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	dto := toPublicSupportRequestDTO(res.Request)
+	dto := s.toPublicSupportRequestDTO(res.Request)
 	respEnv := SupportTicketResponseEnvelope{
 		SupportRequest: dto,
 		Warnings:       []string{},
@@ -334,7 +342,7 @@ func (s *server) handleGetSupportRequest(w http.ResponseWriter, r *http.Request)
 		writeSupportError(w, http.StatusForbidden, "forbidden", "access denied to support request conversation", 0)
 		return
 	}
-	dto := toPublicSupportRequestDTO(req)
+	dto := s.toPublicSupportRequestDTO(req)
 	var deviceDTO *DeviceBindingPublicDTO
 	if req.DeviceBindingID != nil && *req.DeviceBindingID != "" {
 		if b, bErr := s.bindings.GetForTenant(r.Context(), u.TenantID(), *req.DeviceBindingID); bErr == nil {
@@ -420,7 +428,7 @@ func (s *server) handleRetrySupportRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	dto := toPublicSupportRequestDTO(res)
+	dto := s.toPublicSupportRequestDTO(res)
 	respEnv := SupportTicketResponseEnvelope{
 		SupportRequest: dto,
 		Warnings:       []string{},
@@ -518,7 +526,7 @@ func (s *server) handleReconcileSupportRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	dto := toPublicSupportRequestDTO(res)
+	dto := s.toPublicSupportRequestDTO(res)
 	writeJSON(w, http.StatusOK, SupportTicketResponseEnvelope{
 		SupportRequest: dto,
 		Warnings:       []string{},
@@ -687,7 +695,7 @@ func (s *server) handleUpdateSupportRequestDevice(w http.ResponseWriter, r *http
 		return
 	}
 
-	reqDTO := toPublicSupportRequestDTO(updatedReq)
+	reqDTO := s.toPublicSupportRequestDTO(updatedReq)
 	bDTO := toPublicDeviceBindingDTO(binding)
 	writeJSON(w, http.StatusOK, SupportTicketResponseEnvelope{
 		SupportRequest:     reqDTO,

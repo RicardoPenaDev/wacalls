@@ -77,18 +77,16 @@ A tarefa **T-007** é o marco final de encerramento da **Fase 1 (MVP GLPI + Tact
   - Backend: `cmd/server/supportservice.go`, `cmd/server/supportapi.go`, `internal/glpi/client.go`.
 - **Ressalva Arquitetural do Href da API**:
   O `href` retornado pela High-Level REST API v2.3 do GLPI aponta tipicamente para um endpoint REST de recurso JSON (ex.: `/api.php/v2.3/Assistance/Ticket/1001`), e **não** para a interface gráfica web utilizada por atendentes humanos (ex.: `/front/ticket.form.php?id=1001`). Portanto, o `href` da API não deve ser renderizado diretamente como link de navegação visual sem confirmação de que ele realmente entrega uma interface humana adequada.
-- **Decisão Arquitetural Pendente (a ser resolvida antes da Etapa 7.2)**:
-  A especificação define três alternativas para a origem do link e navegação ao GLPI:
-  - **Opção A**: O backend valida e resolve a URL absoluta do ticket web contra a `WACALLS_GLPI_BASE_URL` configurada no ambiente seguro do servidor, retornando a URL canônica da interface web higienizada.
-  - **Opção B**: O backend retorna estritamente o `glpi_ticket_id` numérico, e o frontend monta a URL de navegação a partir de uma base institucional segura configurada explicitamente em tempo de build/execução.
-  - **Opção C (Fallback Seguro)**: Remover temporariamente a ação "Abrir no GLPI" da interface, mantendo estritamente a exibição textual e cópia do identificador numérico do ticket (`#1001`), eliminando temporariamente a superfície de ataque por link até que a URL oficial da interface web seja homologada.
-- **Requisitos Obrigatórios (Comuns a Qualquer Opção)**:
-  1. **Esquema Seguro**: Exigência estrita de esquema `https:` em produção (`http:` permitido unicamente em desenvolvimento local sob `localhost` / loopback).
-  2. **Isolamento de Janela**: Presença obrigatória de `target="_blank"` e `rel="noopener noreferrer"`.
-  3. **Rejeição de Esquemas e Conteúdos Perigosos**: Rejeição imediata de URLs contendo `javascript:`, `data:`, `vbscript:` ou credenciais embutidas (`user:password@host` / userinfo).
+- **Decisão Arquitetural Resolvida (Decisão D-020 — Opção A Restrita)**:
+  O link web é construído e validado exclusivamente pelo backend a partir de `WACALLS_GLPI_WEB_BASE_URL` e do ID decimal positivo do ticket (`/front/ticket.form.php?id={id}`). O `href` retornado pela API v2.3 permanece estritamente no armazenamento interno/store e é omitido do DTO público (`SupportRequestPublicDTO`), que expõe exclusivamente `webUrl` segura. Se `WACALLS_GLPI_WEB_BASE_URL` estiver ausente, `webUrl` é nulo e a interface web renderiza apenas a ação "Copiar número".
+- **Requisitos Obrigatórios Atendidos**:
+  1. **Esquema Seguro**: Exigência estrita de esquema `https:` (HTTP rejeitado incondicionalmente, inclusive em loopback/localhost).
+  2. **Isolamento de Janela**: Presença obrigatória de `target="_blank"` e `rel="noopener noreferrer"` no link visual do frontend.
+  3. **Rejeição de Esquemas e Conteúdos Perigosos**: `sanitizeGLPIWebUrl` (frontend) exige protocolo `https:` exato, pathname exato `/front/ticket.form.php`, hash/fragmento vazio e exatamente um único parâmetro de query chamado `id` com valor decimal positivo canônico; rejeita qualquer esquema diferente de `https:` (incluindo `javascript:`, `data:`, `vbscript:`), fragmentos, parâmetros de query adicionais (mesmo vazios), `id` duplicado e credenciais embutidas (`userinfo`).
   4. **Sem Credenciais ou Tokens**: Abertura por navegação limpa, sem expor tokens OAuth (`access_token`), chaves de API, senhas ou dados sensíveis em query strings ou fragmentos.
-  5. **Comportamento Seguro para Href Inválido**: Caso a URL seja nula, vazia, malformada ou falhe na validação de origem, o elemento de link não deve ser renderizado como âncora clicável, exibindo apenas o identificador numérico como texto seguro.
-  6. **Sem Domínios Hardcoded**: Proibido fixar domínios específicos de homologação ou de clientes/prefeituras no código-fonte.
+  5. **Comportamento Seguro para Href Inválido**: Caso `webUrl` seja nula, vazia, malformada ou falhe na validação defensiva do frontend (`sanitizeGLPIWebUrl`), o elemento de link não é renderizado, exibindo com segurança a identificação numérica e o botão "Copiar número".
+  6. **Sem Domínios Hardcoded**: Nenhum domínio específico de homologação ou de clientes/prefeituras é fixado no código-fonte.
+  7. **Alinhamento de Origem**: A origem de `WACALLS_GLPI_WEB_BASE_URL` (esquema, host e porta efetiva) deve coincidir estritamente com a de `WACALLS_GLPI_BASE_URL`, abortando no startup em caso de divergência. HTTPS sem porta e HTTPS :443 são equivalentes.
 
 ---
 
@@ -136,7 +134,7 @@ A tarefa **T-007** é o marco final de encerramento da **Fase 1 (MVP GLPI + Tact
   | `WACALLS_GLPI_CLIENT_SECRET` | string | Client Secret OAuth2 do WACalls | Definida no secret manager |
   | `WACALLS_GLPI_USERNAME` | string | Conta técnica exclusiva de serviço | Definida no secret manager |
   | `WACALLS_GLPI_PASSWORD` | string | Senha da conta técnica | Definida no secret manager |
-  | `WACALLS_GLPI_INSECURE_TLS` | bool | Desabilita validação TLS (apenas dev) | `false` (obrigatório em prod) |
+  | `WACALLS_GLPI_WEB_BASE_URL` | string | URL base HTTPS da interface web GLPI (opcional) | Vazio (desabilitado) |
   | `WACALLS_TACTICAL_BASE_URL` | string | URL base HTTPS da API Tactical RMM | Definida no secret manager |
   | `WACALLS_TACTICAL_API_KEY` | string | Chave de API Tactical RMM | Definida no secret manager |
   | `features.support` | bool | Feature flag frontend no cliente | `false` |

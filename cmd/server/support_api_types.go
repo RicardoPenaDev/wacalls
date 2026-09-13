@@ -11,7 +11,8 @@ import (
 )
 
 // SupportRequestPublicDTO is the sanitized, public representation of a support request.
-// It deliberately omits internal security tokens (processing_token, payload_fingerprint).
+// It deliberately omits internal security tokens (processing_token, payload_fingerprint)
+// and internal API hrefs (glpiTicketHref), exposing exclusively the pre-validated webUrl for user navigation.
 type SupportRequestPublicDTO struct {
 	ID                 string  `json:"id"`
 	SessionID          string  `json:"sessionId"`
@@ -26,7 +27,7 @@ type SupportRequestPublicDTO struct {
 	LastErrorCode      *string `json:"lastErrorCode,omitempty"`
 	AttemptCount       int     `json:"attemptCount"`
 	GLPITicketID       *string `json:"glpiTicketId,omitempty"`
-	GLPITicketHref     *string `json:"glpiTicketHref,omitempty"`
+	WebURL             *string `json:"webUrl,omitempty"`
 	CategoryID         *string `json:"categoryId,omitempty"`
 	LocationID         *string `json:"locationId,omitempty"`
 	Priority           int     `json:"priority"`
@@ -35,7 +36,7 @@ type SupportRequestPublicDTO struct {
 	ProcessedAt        *int64  `json:"processedAt,omitempty"`
 }
 
-func toPublicSupportRequestDTO(r *SupportRequest) SupportRequestPublicDTO {
+func toPublicSupportRequestDTO(r *SupportRequest, webBaseURL string) SupportRequestPublicDTO {
 	if r == nil {
 		return SupportRequestPublicDTO{}
 	}
@@ -52,7 +53,6 @@ func toPublicSupportRequestDTO(r *SupportRequest) SupportRequestPublicDTO {
 		SyncState:          string(r.SyncState),
 		AttemptCount:       r.AttemptCount,
 		GLPITicketID:       r.GLPITicketID,
-		GLPITicketHref:     r.GLPITicketHref,
 		CategoryID:         r.CategoryID,
 		LocationID:         r.LocationID,
 		Priority:           r.Priority,
@@ -64,6 +64,11 @@ func toPublicSupportRequestDTO(r *SupportRequest) SupportRequestPublicDTO {
 	}
 	if r.ProcessedAt > 0 {
 		dto.ProcessedAt = &r.ProcessedAt
+	}
+	if r.GLPITicketID != nil && webBaseURL != "" {
+		if webURL, err := buildGLPITicketWebURL(webBaseURL, *r.GLPITicketID); err == nil && webURL != "" {
+			dto.WebURL = &webURL
+		}
 	}
 	return dto
 }

@@ -28,7 +28,7 @@ export interface SupportRequestDTO {
   lastErrorCode?: string | null;
   attemptCount: number;
   glpiTicketId?: string | null;
-  glpiTicketHref?: string | null;
+  webUrl?: string | null;
   categoryId?: string | null;
   locationId?: string | null;
   priority: number;

@@ -21,6 +21,7 @@ import { DeviceSummary } from "./DeviceSummary";
 import { RetryAction } from "./RetryAction";
 import { ReconcileDialog } from "./ReconcileDialog";
 import { isAdmin } from "@/stores/auth";
+import { sanitizeGLPIWebUrl } from "@/lib/supportUrl";
 import type { AuthUser } from "@/types/auth";
 import type { DeviceBindingDTO, SupportRequestDTO, SupportSyncState, SupportTicketResponseEnvelope } from "@/types/support";
 
@@ -96,24 +97,25 @@ export const SupportRequestStatus = ({
   onNewTicketClick,
   onChangeDeviceClick,
 }: Props) => {
-  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedNumber, setCopiedNumber] = useState(false);
   const [showReconcile, setShowReconcile] = useState(false);
   const [showFullDesc, setShowFullDesc] = useState(false);
 
   const stateCfg = STATE_CONFIG[request.syncState] || STATE_CONFIG.unknown;
   const StateIcon = stateCfg.icon;
 
-  const handleCopyLink = async () => {
-    if (!request.glpiTicketHref) return;
+  const handleCopyNumber = async () => {
+    if (!request.glpiTicketId) return;
     try {
-      await navigator.clipboard.writeText(request.glpiTicketHref);
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
+      await navigator.clipboard.writeText(request.glpiTicketId);
+      setCopiedNumber(true);
+      setTimeout(() => setCopiedNumber(false), 2000);
     } catch {
       // ignore
     }
   };
 
+  const safeWebUrl = sanitizeGLPIWebUrl(request.webUrl);
   const userIsAdmin = isAdmin(currentUser);
   const formattedDate = request.createdAt ? new Date(request.createdAt).toLocaleString() : "—";
 
@@ -141,22 +143,20 @@ export const SupportRequestStatus = ({
       </div>
 
       {/* GLPI Ticket Confirmation Box */}
-      {request.syncState === "synced" && (request.glpiTicketId || request.glpiTicketHref) && (
+      {request.syncState === "synced" && request.glpiTicketId && (
         <div className="rounded-lg border bg-emerald-500/5 border-emerald-500/30 p-3.5 space-y-2.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 font-semibold text-xs text-foreground">
               <Ticket className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
               <span>Ticket GLPI Confirmado</span>
             </div>
-            {request.glpiTicketId && (
-              <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400 text-sm">
-                #{request.glpiTicketId}
-              </span>
-            )}
+            <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400 text-sm">
+              #{request.glpiTicketId}
+            </span>
           </div>
 
           <div className="flex items-center gap-2 pt-1">
-            {request.glpiTicketHref && (
+            {safeWebUrl && (
               <Button
                 asChild
                 size="sm"
@@ -164,7 +164,7 @@ export const SupportRequestStatus = ({
                 className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
               >
                 <a
-                  href={request.glpiTicketHref}
+                  href={safeWebUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center gap-1.5"
@@ -174,27 +174,25 @@ export const SupportRequestStatus = ({
                 </a>
               </Button>
             )}
-            {request.glpiTicketHref && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={handleCopyLink}
-                className="h-8 text-xs"
-              >
-                {copiedLink ? (
-                  <>
-                    <Check className="mr-1 h-3.5 w-3.5 text-emerald-500" />
-                    Copiado!
-                  </>
-                ) : (
-                  <>
-                    <Copy className="mr-1 h-3.5 w-3.5" />
-                    Copiar Link
-                  </>
-                )}
-              </Button>
-            )}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={handleCopyNumber}
+              className="h-8 text-xs"
+            >
+              {copiedNumber ? (
+                <>
+                  <Check className="mr-1 h-3.5 w-3.5 text-emerald-500" />
+                  Copiado!
+                </>
+              ) : (
+                <>
+                  <Copy className="mr-1 h-3.5 w-3.5" />
+                  Copiar número
+                </>
+              )}
+            </Button>
           </div>
         </div>
       )}

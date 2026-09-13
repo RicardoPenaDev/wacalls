@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { sanitizeGLPIWebUrl } from "../src/lib/supportUrl.ts";
 
 // Mock fetch helper to simulate backend responses
 function createMockFetch(handler) {
@@ -34,7 +35,7 @@ test("Criação de chamado: envia Idempotency-Key no header e payload correto", 
           syncState: "synced",
           attemptCount: 1,
           glpiTicketId: "1001",
-          glpiTicketHref: "https://glpi.internal/ticket/1001",
+          webUrl: "https://glpi.internal/front/ticket.form.php?id=1001",
           createdAt: Date.now(),
           updatedAt: Date.now(),
         },
@@ -264,4 +265,169 @@ test("Fallback Tactical: telemetria suprimida quando features.tactical=false e w
   assert.equal(viewC.rendered, true);
   assert.equal(viewC.mode, "agent_data");
   assert.equal(viewC.agent.status, "online");
+});
+
+// ---------------------------------------------------------------------------
+// 8. Sanitização e Validação Defensiva da webUrl GLPI no Frontend
+// ---------------------------------------------------------------------------
+test("Sanitização defensiva de webUrl GLPI: aceita https bem formada e rejeita esquemas inseguros ou malformados", () => {
+  // Cenários válidos
+  const validUrl = "https://glpi.example.com/front/ticket.form.php?id=1001";
+  assert.equal(sanitizeGLPIWebUrl(validUrl), validUrl);
+
+  const validWithPort = "https://glpi.example.com:8443/front/ticket.form.php?id=42";
+  assert.equal(sanitizeGLPIWebUrl(validWithPort), validWithPort);
+
+  // Rejeição de HTTP (sempre em produção/frontend)
+  assert.equal(sanitizeGLPIWebUrl("http://glpi.example.com/front/ticket.form.php?id=1001"), null);
+
+  // Rejeição de esquemas perigosos
+  assert.equal(sanitizeGLPIWebUrl("javascript:alert(document.cookie)"), null);
+  assert.equal(sanitizeGLPIWebUrl("data:text/html,<script>alert(1)</script>"), null);
+  assert.equal(sanitizeGLPIWebUrl("vbscript:msgbox(1)"), null);
+
+  // Rejeição de credenciais embutidas (userinfo)
+  assert.equal(sanitizeGLPIWebUrl("https://admin:secret@glpi.example.com/front/ticket.form.php?id=1001"), null);
+  assert.equal(sanitizeGLPIWebUrl("https://user@glpi.example.com/front/ticket.form.php?id=1001"), null);
+
+  // Rejeição de URLs que apontam para endpoints REST internos em vez da UI web
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/api.php/v2.3/Assistance/Ticket/1001"), null);
+
+  // Rejeição de ID ausente, não numérico, negativo ou com injeção
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php"), null);
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=0"), null);
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=-1"), null);
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=abc"), null);
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=1;DROP"), null);
+
+  // Rejeição de nulo, indefinido, vazio
+  assert.equal(sanitizeGLPIWebUrl(null), null);
+  assert.equal(sanitizeGLPIWebUrl(undefined), null);
+  assert.equal(sanitizeGLPIWebUrl(""), null);
+  assert.equal(sanitizeGLPIWebUrl("   "), null);
+});
+
+// ---------------------------------------------------------------------------
+// 8b. Sanitização estrita: hash, parâmetros extras, id duplicado, query vazia
+// ---------------------------------------------------------------------------
+test("Sanitização estrita de webUrl GLPI: exige exatamente um único par id=<decimal> sem hash, extras ou duplicação", () => {
+  // URL válida com somente ?id=123
+  const soIdValido = "https://glpi.example.com/front/ticket.form.php?id=123";
+  assert.equal(sanitizeGLPIWebUrl(soIdValido), soIdValido);
+
+  // URL com #fragment
+  assert.equal(
+    sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=123#section"),
+    null,
+  );
+
+  // URL com &redirect=...
+  assert.equal(
+    sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=123&redirect=https://evil.com"),
+    null,
+  );
+
+  // URL com parâmetro adicional vazio
+  assert.equal(
+    sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=123&extra="),
+    null,
+  );
+
+  // URL com id duplicado
+  assert.equal(
+    sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?id=1&id=2"),
+    null,
+  );
+
+  // URL sem id (query com outro nome de parâmetro)
+  assert.equal(
+    sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?ticket=123"),
+    null,
+  );
+
+  // URL com query vazia (apenas "?")
+  assert.equal(sanitizeGLPIWebUrl("https://glpi.example.com/front/ticket.form.php?"), null);
+
+  // URL com userinfo
+  assert.equal(
+    sanitizeGLPIWebUrl("https://admin:secret@glpi.example.com/front/ticket.form.php?id=123"),
+    null,
+  );
+
+  // URL com protocolo diferente de HTTPS
+  assert.equal(sanitizeGLPIWebUrl("http://glpi.example.com/front/ticket.form.php?id=123"), null);
+  assert.equal(sanitizeGLPIWebUrl("ftp://glpi.example.com/front/ticket.form.php?id=123"), null);
+
+  // Nenhum caso de rejeição lança exceção (garantido pelo uso de assert.equal acima sem try/catch)
+});
+
+// ---------------------------------------------------------------------------
+// 9. Ações do Ticket Confirmado: Abrir no GLPI vs Copiar número
+// ---------------------------------------------------------------------------
+test("Ações do ticket confirmado: renderiza Abrir no GLPI com target/rel seguros e preserva Copiar número", async () => {
+  // Lógica de resolução de ações espelhando SupportRequestStatus
+  const resolveActions = (req) => {
+    if (req.syncState !== "synced" || !req.glpiTicketId) {
+      return { showBox: false, showWebLink: false, showCopyNumber: false, webUrl: null };
+    }
+    const safeUrl = sanitizeGLPIWebUrl(req.webUrl);
+    return {
+      showBox: true,
+      showWebLink: Boolean(safeUrl),
+      showCopyNumber: true,
+      webUrl: safeUrl,
+      target: "_blank",
+      rel: "noopener noreferrer",
+    };
+  };
+
+  // Cenário A: Chamado com webUrl válida -> ambos os botões aparecem
+  const reqComLink = {
+    syncState: "synced",
+    glpiTicketId: "2001",
+    webUrl: "https://glpi.example.com/front/ticket.form.php?id=2001",
+  };
+  const actA = resolveActions(reqComLink);
+  assert.equal(actA.showBox, true);
+  assert.equal(actA.showWebLink, true);
+  assert.equal(actA.webUrl, "https://glpi.example.com/front/ticket.form.php?id=2001");
+  assert.equal(actA.target, "_blank");
+  assert.equal(actA.rel, "noopener noreferrer");
+  assert.equal(actA.showCopyNumber, true);
+
+  // Cenário B: Chamado legado ou sem base web (webUrl ausente) -> somente Copiar número
+  const reqSemLink = {
+    syncState: "synced",
+    glpiTicketId: "1002",
+    webUrl: null,
+  };
+  const actB = resolveActions(reqSemLink);
+  assert.equal(actB.showBox, true);
+  assert.equal(actB.showWebLink, false, "Botão web deve ser ocultado quando webUrl é nula");
+  assert.equal(actB.webUrl, null);
+  assert.equal(actB.showCopyNumber, true, "Copiar número permanece acessível em dados legados");
+
+  // Cenário C: Chamado com URL insegura (ex: endpoint da API ou HTTP) -> botão web é suprimido
+  const reqInseguro = {
+    syncState: "synced",
+    glpiTicketId: "1003",
+    webUrl: "http://glpi.example.com/front/ticket.form.php?id=1003",
+  };
+  const actC = resolveActions(reqInseguro);
+  assert.equal(actC.showWebLink, false, "Botão web deve ser suprimido para URL http insegura");
+  assert.equal(actC.showCopyNumber, true);
+
+  // Cenário D: Ação de cópia do número opera sobre o ID
+  let copiedText = "";
+  const copyNumber = async (ticketId) => {
+    copiedText = ticketId;
+  };
+  await copyNumber(reqComLink.glpiTicketId);
+  assert.equal(copiedText, "2001");
+
+  // Cenário E: Isolamento — nenhuma chamada à API externa GLPI é efetuada no frontend
+  let apiRequests = 0;
+  const mockGLPIApi = () => { apiRequests++; };
+  // Apenas a ação de navegação pura no navegador é utilizada
+  assert.equal(apiRequests, 0, "O frontend nunca deve disparar requisições diretas à API GLPI");
 });

@@ -247,6 +247,24 @@ Consequência: o ciclo de vida inicial é imune a interrupções não recuperáv
 ganha método de consulta `GetTicket`; e o rate limit de 10 claims/60s não entra no escopo
 inicial do MVP.
 
+## D-019 — Avaliação de arquitetura de rate limiting para claims
+
+Data: 2026-09-13 · Status: proposta
+
+Decisão proposta: Avaliar na Etapa 7.5 entre reverse proxy (Nginx/Caddy), middleware persistente em Redis/banco ou manutenção da estratégia atual de idempotência atômica e CAS no banco de dados.
+Motivo: Evitar decisões prematuras de infraestrutura pesada no MVP sem evidência de saturação.
+Alternativas consideradas: Adicionar Redis imediatamente no MVP — rejeitada.
+Consequências: O MVP prossegue com a proteção de concorrência por chave de idempotência e transações atômicas de claim.
+
+## D-020 — Hardening do link da interface web do GLPI via backend seguro (Opção A restrita)
+
+Data: 2026-09-13 · Status: aceita
+
+Decisão: O link web do ticket no painel de suporte é gerado e validado exclusivamente pelo backend a partir da configuração `WACALLS_GLPI_WEB_BASE_URL` e do ID decimal positivo do ticket (`/front/ticket.form.php?id={id}`). O `href` da API v2.3 permanece estritamente interno no domínio/store e é omitido da serialização do DTO público. O DTO público expõe o campo `webUrl`. Caso `WACALLS_GLPI_WEB_BASE_URL` não seja informada, o link web permanece desabilitado (`webUrl` nulo) e a interface exibe apenas a ação "Copiar número". O frontend aplica validação defensiva complementar (exigência de protocolo `https:`, rejeição de credenciais embutidas, esquemas perigosos e URLs malformadas).
+Motivo: Prevenir injeção de links maliciosos, impedir vazamento de rotas internas da API REST JSON, e resolver a incompatibilidade entre o endpoint da API v2.3 e a tela gráfica acessível por atendentes humanos.
+Alternativas consideradas: Opção B (montagem no frontend com base injetada em tempo de build) e Opção C (remoção definitiva do link mantendo apenas cópia do ID).
+Consequências: Acesso seguro e auditado à tela do chamado no GLPI; falha no startup se houver divergência de origem entre a API e a interface web; preservação da cópia de número para chamados legados e ambientes sem link web habilitado.
+
 ## Modelo para novas decisões
 
 ```text

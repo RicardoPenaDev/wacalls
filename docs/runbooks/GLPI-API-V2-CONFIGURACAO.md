@@ -85,6 +85,7 @@ Registrar valores somente no secret manager ou no ambiente protegido. O Git e
 
 - `WACALLS_SUPPORT_ENABLED`
 - `WACALLS_GLPI_BASE_URL`
+- `WACALLS_GLPI_WEB_BASE_URL`
 - `WACALLS_GLPI_CLIENT_ID`
 - `WACALLS_GLPI_CLIENT_SECRET`
 - `WACALLS_GLPI_USERNAME`
@@ -94,11 +95,20 @@ Registrar valores somente no secret manager ou no ambiente protegido. O Git e
 - `WACALLS_GLPI_ENTITY_RECURSIVE`
 - `WACALLS_GLPI_ACCEPT_LANGUAGE`
 - `WACALLS_GLPI_TIMEOUT_SECONDS`
-- `WACALLS_GLPI_INSECURE_TLS`
 
 O scope `api`, o token endpoint `/api.php/token` e a base versionada
 `/api.php/v2.3` são contrato do cliente, não segredos configuráveis.
-`WACALLS_GLPI_INSECURE_TLS` deve permanecer desligado em produção.
+TLS permanece sempre verificado; não há suporte a flags inseguras nem opção `InsecureSkipVerify`.
+
+### Interface Web do GLPI (`WACALLS_GLPI_WEB_BASE_URL`)
+
+- **Objetivo**: Fornece a URL base HTTPS para geração segura do link web de tickets para atendentes humanos (`{origem_web}/front/ticket.form.php?id={id}`).
+- **Obrigatoriedade e Fallback Seguro**: Variável opcional. Quando não informada, a funcionalidade do botão web permanece desabilitada e o painel de suporte exibe exclusivamente a ação "Copiar número" do chamado.
+- **Regras de Segurança Estritas**:
+  - Exige estritamente esquema HTTPS (HTTP rejeitado incondicionalmente, inclusive em loopback/localhost).
+  - Proibido conter userinfo (credenciais embutidas), query strings ou fragmentos.
+  - Deve possuir a mesma origem (esquema, host normalizado e porta efetiva) de `WACALLS_GLPI_BASE_URL`; divergência de origem aborta o startup do servidor. HTTPS sem porta e HTTPS :443 são equivalentes.
+  - O href interno retornado pela API v2.3 (`/api.php/v2.3/...`) é restrito ao banco de dados interno e jamais exposto ao navegador do usuário.
 
 ## Validação segura
 

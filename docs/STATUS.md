@@ -2,70 +2,66 @@
 
 Atualizado em: 2026-09-13
 Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa atual: `T-006` — IMPLEMENTAÇÃO DO PAINEL DE SUPORTE CONCLUÍDA LOCALMENTE (build Vite OK, testes 100% aprovados; sem push).
+Tarefa atual: `T-006` — Painel de suporte frontend implementado e validado em mocks locais.
 
 ## Objetivo imediato
 
-Apresentar a revisão e os testes da implementação frontend da T-006 para validação do usuário.
+Registrar o fechamento documental da T-006 e planejar a T-007 (fechamento, hardening, runbook e deploy da Fase 1).
 
 ```text
-T-005 backend publicado (OK) → T-006 especificação UI/UX (OK) → implementação T-006 (OK) → revisão / autorização de push (pendente)
+T-005 backend (publicado) → T-006 frontend (implementado e validado com mocks) → T-007 planejamento (não iniciada)
 ```
 
 ## Concluído
 
-- `T-001` — inventário/baseline do código.
-- `T-002` — plano técnico do slice; decisões D-013/D-014.
-- `T-B001` — pacote `internal/voip/media` recuperado e versionado.
-- `T-003` — normalização de hostname e store `device_bindings`, com SQLite.
-- `T-004` — clientes `internal/glpi` e `internal/tactical`, testes offline.
-- `chore` — `.gitattributes` multiplataforma com política explícita de EOL.
-- `T-B002` — harness MariaDB descartável validado 100% em SQLite e MariaDB 11.4.
-- `T-005 (backend de suporte completo)` — concluída e publicada em `origin/main`:
-  - DDL e integridade referencial com FK composta (SQLite e MariaDB).
-  - GLPI `GetTicket` v2.3 com sanitização e renovação OAuth.
-  - `SupportService` com ciclo fechado, CAS, anti-duplicação e consulta estritamente tenant-scoped (`GetForTenant`).
-  - 8 rotas HTTP sob `WACALLS_SUPPORT_ENABLED` com validação de payload e proteção anti-IDOR.
-- `T-006 (especificação e implementação frontend)`:
-  - Especificação em `docs/tasks/T-006-PAINEL-SUPORTE-FRONTEND.md` com baseline documental commit `a8e19f4fe0d49f5ca84f9db02eb0b7b720afbe6a`.
-  - Painel lateral (Opção 1: Sheet à direita) integrado em `ChatView.tsx` preservando 100% a timeline de mensagens.
-  - Botão de suporte condicionado a `features.support = true`.
-  - DTOs em `types/support.ts` e API client em `services/support.ts` consumindo os 8 endpoints.
-  - Idempotency-Key estável (`ui-<uuid>`) preservada entre renderizações e com bloqueio anti-duplo clique.
-  - Cobertura completa dos 5 estados (`processing`, `synced`, `retryable_error`, `unknown`, `failed`).
-  - Retry restrito a `retryable_error` com suporte a HTTP 429 `Retry-After`.
-  - Reconciliação restrita a administradores (`isAdmin(user)`) em estado `unknown`.
-  - Troca de equipamento via `DevicePickerModal` com busca debounced e atualização imediata.
-  - Telemetria Tactical exibida apenas com `features.tactical = true` e fallback seguro com aviso amigável quando indisponível.
-  - Suite de testes frontend (`client/tests/support.test.mjs`) cobrindo todos os 7 fluxos críticos com 100% de sucesso.
-  - Build de produção (`vite build`) e testes Go de regressão (`go test ./...`) 100% verdes.
+- `T-001` — Inventário e baseline do código.
+- `T-002` — Plano técnico do slice (decisões D-013/D-014).
+- `T-B001` — Recuperação do pacote `internal/voip/media`.
+- `T-003` — Normalização de hostnames e store `device_bindings` (SQLite/MariaDB).
+- `T-004` — Clientes HTTP `internal/glpi` e `internal/tactical` com testes offline.
+- `T-B002` — Harness de teste MariaDB descartável.
+- `T-005` — Backend de suporte GLPI + Tactical completo (publicado em `origin/main`):
+  - DDL com chaves compostas e integridade referencial.
+  - GLPI 11.0.8 / High-Level REST API v2.3 (`GetTicket`) e `SupportService` atômico com idempotência.
+  - Rotas sob `WACALLS_SUPPORT_ENABLED` e isolamento multi-tenant.
+- `T-006` — Frontend do Painel de Suporte (commit `db1ee3f`):
+  - Componentes: `SupportPanel`, `SupportTicketForm`, `SupportRequestStatus`, `DeviceSummary`, `TacticalStatus`, `DevicePickerModal`, `RetryAction`, `ReconcileDialog`.
+  - Integração aditiva ao `ChatView.tsx` sob `features.support = true`.
+  - Preservação integral do rascunho de mensagem e timeline no WhatsApp.
+  - Fallback sem telemetria quando `features.tactical = false`.
+  - Cobertura de estados: `processing`, `synced`, `retryable_error`, `unknown`, `failed`.
+  - Reconciliação em estado `unknown` restrita a administradores (`isAdmin(user)`).
 
-## Bloqueios
+## Validações Realizadas
 
-- Vínculo nativo Ticket↔Computer: indisponível na API GLPI v2.3; mantido contexto textual.
-- `conversation_id`: fora do MVP; bloqueia somente portal futuro.
-- Push remoto: bloqueado até autorização formal do usuário.
+1. **Frontend Build:** `npx vite build` executado com sucesso (zero erros).
+2. **Frontend Unitários:** `npm run test` executando `client/tests/support.test.mjs` (7/7 aprovados).
+   - Inclui validação estrita de rede e idempotência contra disparos concorrentes de requisição.
+3. **Testes Direcionados de Suporte / Backend:**
+   - Compilação `go build ./...` aprovada.
+   - `go test -run Support ./cmd/server` e testes dos pacotes `internal/glpi` e `internal/tactical` 100% aprovados.
+4. **Validação E2E Local (com Mocks):**
+   - 7/7 cenários validados via navegador real contra backend local e mocks HTTP de GLPI 11.0.8 / High-Level REST API v2.3 e Tactical RMM em loopback.
+   - Execução via script temporário de apoio (não versionado).
+   - Validou: abertura do painel com dispositivo vinculado, transição atômica `processing` → `synced`, retenção de rascunho de chat, comportamento visual/operacional anti-duplo clique (botão desabilitado e estado de envio), resposta a 429 (`Retry-After`), fallback de telemetria desabilitada e controle de acesso a reconciliação (operador sem ação vs admin com modal).
+5. **Navegação "Abrir no GLPI":**
+   - Navegação estrita por link (`target="_blank"` com `href` para a URL do chamado retornada pelo backend).
+   - Não manipula nem armazena credenciais do GLPI no navegador; depende de sessão/login prévio do usuário no GLPI.
+   - Item mapeado para revisão de hardening na T-007 (ex.: validação de URL e atributos de segurança).
 
-## Estado Git do checkpoint
+## Pendências e Observações
 
-- HEAD local: commit de documentação (`a8e19f4`) seguido pelo commit de implementação da T-006.
-- Nenhum push realizado ou autorizado.
+- **Suíte Go Global (Baseline Pré-existente):** `go test ./...` apresenta divergência pré-existente de timezone de 1 dia em `TestLicenseStatusFaixasDeVencimento` (`license_test.go:181`). Sem relação com o suporte, mas registrada como pendência de baseline a ser investigada antes da T-007.
+- **Homologação em Ambiente Real:** Validações de T-006 foram conduzidas em ambiente simulado com mocks locais. Homologação com servidores reais de GLPI 11.0.8 e Tactical RMM permanece pendente para ambiente controlado de homologação/staging.
+- **Vínculo nativo Ticket ↔ Computer:** Indisponível na High-Level REST API v2.3 do GLPI (mantido vínculo lógico no banco local e contextual em texto do ticket).
 
-## Próximo passo
+## Próximo Passo
 
-Revisão da implementação pelo usuário e autorização para publicação/push quando oportuno.
+- Planejamento da `T-007` — Hardening de segurança, auditoria, telemetria, runbook e documentação final de encerramento da Fase 1 (execução da T-007 ainda não iniciada).
 
-## Ambiente preservado
+## Estado Git
 
-- Windows 11 x64 (`OhMyPi`).
-- Go 1.26.4 portátil em `D:/fabrica/WaCalls/toolchains/`.
-- Node.js 24.21.0 / Vite 7 / React 19 no diretório `client/`.
-- Docker Desktop 4.90.0 (WSL2 backend) restrito ao harness de testes locais.
-- Nenhuma credencial real no repositório.
-
-## Não tocar nesta etapa
-
-- backend Go (`cmd/server/`, `internal/`) e banco de dados;
-- rotas existentes de `messageapi.go` e modelo `(session_id, chat_jid)`;
-- automação remota Tactical, retry automático ou worker GLPI;
-- chamadas externas reais ou push até autorização.
+- T-005: Concluída e publicada em `origin/main`.
+- T-006: Implementada e publicada em `origin/main` (commit `db1ee3f`), com validação E2E local em mocks concluída.
+- T-007: Não iniciada.
+- Push: Não realizado.

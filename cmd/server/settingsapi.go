@@ -132,12 +132,21 @@ func (s *server) handleGetOptions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if v == "" {
-		writeJSON(w, 200, map[string]any{})
-		return
-	}
 	var obj map[string]any
-	_ = json.Unmarshal([]byte(v), &obj)
+	if v != "" {
+		_ = json.Unmarshal([]byte(v), &obj)
+	}
+	if obj == nil {
+		obj = make(map[string]any)
+	}
+	features, ok := obj["features"].(map[string]any)
+	if !ok || features == nil {
+		features = make(map[string]any)
+	}
+	features["support"] = s.isSupportEnabled()
+	features["tactical"] = s.isTacticalEnabled()
+	obj["features"] = features
+
 	writeJSON(w, 200, obj)
 }
 

@@ -39,7 +39,7 @@ type supportStoreBackend interface {
 
 // deviceBindingStoreBackend defines the device binding store interface consumed by the support service.
 type deviceBindingStoreBackend interface {
-	Get(ctx context.Context, id string) (DeviceBinding, error)
+	GetForTenant(ctx context.Context, tenantID, id string) (DeviceBinding, error)
 	FindByHostname(ctx context.Context, tenantID, hostname string) (DeviceBinding, bool, error)
 	Upsert(ctx context.Context, b DeviceBinding) (DeviceBinding, error)
 	Search(ctx context.Context, tenantID, query string) ([]DeviceBinding, error)

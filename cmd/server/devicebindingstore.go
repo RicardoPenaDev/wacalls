@@ -184,6 +184,24 @@ func (s *deviceBindingStore) Get(ctx context.Context, id string) (DeviceBinding,
 	return b, nil
 }
 
+// GetForTenant returns a binding by its primary id within the specified tenant.
+// If the binding does not exist or belongs to another tenant, it returns ErrDeviceBindingNotFound.
+func (s *deviceBindingStore) GetForTenant(ctx context.Context, tenantID, id string) (DeviceBinding, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return DeviceBinding{}, ErrMissingTenant
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT `+deviceBindingColumns+`
+		FROM device_bindings WHERE id = ? AND tenant_id = ?`, id, tenantID)
+	b, err := scanDeviceBinding(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DeviceBinding{}, ErrDeviceBindingNotFound
+		}
+		return DeviceBinding{}, err
+	}
+	return b, nil
+}
+
 // FindByHostname resolves a binding within a tenant by exact normalized
 // hostname. The bool reports presence; a valid-but-absent hostname returns
 // (zero, false, nil).

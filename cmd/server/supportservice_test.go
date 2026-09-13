@@ -952,6 +952,104 @@ func TestSupportService_TenantIsolation(t *testing.T) {
 	}
 }
 
+type bindingSpyBackend struct {
+	getForTenantCalls   []struct{ tenantID, id string }
+	findByHostnameCalls []struct{ tenantID, host string }
+	upsertCalls         []DeviceBinding
+	searchCalls         []struct{ tenantID, q string }
+	getForTenantFn      func(ctx context.Context, tenantID, id string) (DeviceBinding, error)
+}
+
+func (s *bindingSpyBackend) GetForTenant(ctx context.Context, tenantID, id string) (DeviceBinding, error) {
+	s.getForTenantCalls = append(s.getForTenantCalls, struct{ tenantID, id string }{tenantID, id})
+	if s.getForTenantFn != nil {
+		return s.getForTenantFn(ctx, tenantID, id)
+	}
+	return DeviceBinding{}, ErrDeviceBindingNotFound
+}
+
+func (s *bindingSpyBackend) FindByHostname(ctx context.Context, tenantID, hostname string) (DeviceBinding, bool, error) {
+	s.findByHostnameCalls = append(s.findByHostnameCalls, struct{ tenantID, host string }{tenantID, hostname})
+	return DeviceBinding{}, false, nil
+}
+
+func (s *bindingSpyBackend) Upsert(ctx context.Context, b DeviceBinding) (DeviceBinding, error) {
+	s.upsertCalls = append(s.upsertCalls, b)
+	return b, nil
+}
+
+func (s *bindingSpyBackend) Search(ctx context.Context, tenantID, query string) ([]DeviceBinding, error) {
+	s.searchCalls = append(s.searchCalls, struct{ tenantID, q string }{tenantID, query})
+	return nil, nil
+}
+
+func TestSupportService_CreateTicket_CrossTenantDeviceBindingRejected(t *testing.T) {
+	svc, _, bStore, mockG, _, tdb := setupTestSupportService(t)
+	ctx := context.Background()
+
+	// 1. Create a binding belonging to tenant-B
+	bTenantB, err := bStore.Upsert(ctx, DeviceBinding{
+		OwnerID:  "user-b",
+		TenantID: "tenant-B",
+		Hostname: "HOST-TENANT-B",
+	})
+	if err != nil {
+		t.Fatalf("failed to create tenant-B binding: %v", err)
+	}
+
+	// 2. Attempt to create ticket in tenant-A pointing to tenant-B's binding
+	input := sampleServiceCreateInput("tenant-A", "idemp-crosstenant-dev-12345")
+	input.DeviceBindingID = &bTenantB.ID
+	h := "HOST-TENANT-B"
+	input.Hostname = &h
+
+	res, err := svc.CreateTicket(ctx, input)
+	if !errors.Is(err, ErrDeviceBindingNotFound) {
+		t.Fatalf("expected ErrDeviceBindingNotFound, got err=%v, res=%+v", err, res)
+	}
+
+	// 3. Verify zero calls to GLPI
+	if len(mockG.createTicketCalls) != 0 {
+		t.Fatalf("expected 0 GLPI CreateTicket calls, got %d", len(mockG.createTicketCalls))
+	}
+
+	// 4. Verify no support request was created in DB
+	var countReq int
+	if err := tdb.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM support_requests WHERE tenant_id = 'tenant-A'`).Scan(&countReq); err != nil {
+		t.Fatalf("failed to query support_requests: %v", err)
+	}
+	if countReq != 0 {
+		t.Fatalf("expected 0 support_requests in DB, got %d", countReq)
+	}
+
+	// 5. Verify no support request events were created in DB
+	var countEvents int
+	if err := tdb.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM support_request_events WHERE tenant_id = 'tenant-A'`).Scan(&countEvents); err != nil {
+		t.Fatalf("failed to query support_request_events: %v", err)
+	}
+	if countEvents != 0 {
+		t.Fatalf("expected 0 support_request_events in DB, got %d", countEvents)
+	}
+
+	// 6. Test with a spy backend that only implements deviceBindingStoreBackend (no Get method)
+	spy := &bindingSpyBackend{}
+	svcWithSpy := NewSupportService(svc.store, spy, mockG, nil)
+	bID := "dev-binding-spy-1"
+	spyInput := sampleServiceCreateInput("tenant-A", "idemp-spy-dev-1234567")
+	spyInput.DeviceBindingID = &bID
+
+	_, spyErr := svcWithSpy.CreateTicket(ctx, spyInput)
+	if !errors.Is(spyErr, ErrDeviceBindingNotFound) {
+		t.Fatalf("expected ErrDeviceBindingNotFound with spy, got %v", spyErr)
+	}
+	if len(spy.getForTenantCalls) != 1 {
+		t.Fatalf("expected exactly 1 call to GetForTenant, got %d", len(spy.getForTenantCalls))
+	}
+	if spy.getForTenantCalls[0].tenantID != "tenant-A" || spy.getForTenantCalls[0].id != bID {
+		t.Fatalf("unexpected GetForTenant args: %+v", spy.getForTenantCalls[0])
+	}
+}
+
 func TestSupportService_InputValidation(t *testing.T) {
 	svc, _, _, _, _, _ := setupTestSupportService(t)
 	ctx := context.Background()

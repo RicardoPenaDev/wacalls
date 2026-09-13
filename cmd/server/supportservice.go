@@ -126,15 +126,12 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 
 	if in.DeviceBindingID != nil && strings.TrimSpace(*in.DeviceBindingID) != "" {
 		bID := strings.TrimSpace(*in.DeviceBindingID)
-		binding, err := s.bindings.Get(ctx, bID)
+		binding, err := s.bindings.GetForTenant(ctx, in.TenantID, bID)
 		if err != nil {
 			if errors.Is(err, ErrDeviceBindingNotFound) {
 				return nil, ErrDeviceBindingNotFound
 			}
 			return nil, err
-		}
-		if binding.TenantID != in.TenantID {
-			return nil, ErrDeviceBindingNotFound
 		}
 		if in.Hostname != nil && strings.TrimSpace(*in.Hostname) != "" {
 			if normalizeHostname(*in.Hostname) != binding.HostnameNormalized {
@@ -511,12 +508,9 @@ func (s *SupportService) UpdateDevice(ctx context.Context, in ServiceUpdateDevic
 		return nil, false, err
 	}
 
-	binding, err := s.bindings.Get(ctx, in.DeviceBindingID)
+	binding, err := s.bindings.GetForTenant(ctx, in.TenantID, in.DeviceBindingID)
 	if err != nil {
 		return nil, false, err
-	}
-	if binding.TenantID != in.TenantID {
-		return nil, false, ErrDeviceBindingNotFound
 	}
 
 	bindingID := binding.ID

@@ -72,6 +72,7 @@ func (s *server) routes() http.Handler {
 	s.registerCallControlRoutes(mux)
 	s.registerReportRoutes(mux)
 	s.registerSLARoutes(mux)
+	s.registerSupportRoutes(mux)
 
 	// Serve recorded media (flow record_audio node + future uploads).
 	_ = os.MkdirAll("media", 0o755)
@@ -169,7 +170,7 @@ func withCORS(h http.Handler) http.Handler {
 				// Origem desconhecida: não emitimos cabeçalhos CORS, o
 				// navegador bloqueia a requisição autenticada cross-site.
 			}
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, Authorization, Idempotency-Key")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}

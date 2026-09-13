@@ -3,45 +3,55 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
+	"time"
 
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
 
 	"wacalls/internal/cache"
+	"wacalls/internal/glpi"
 	"wacalls/internal/storage"
+	"wacalls/internal/tactical"
 )
 
 type server struct {
-	broker     *Broker
-	sessions   *SessionManager
-	log        *slog.Logger
-	staticDir  string
-	flows      *flowStore
-	flowExec   *FlowExecutor
+	broker         *Broker
+	sessions       *SessionManager
+	log            *slog.Logger
+	staticDir      string
+	flows          *flowStore
+	flowExec       *FlowExecutor
 	campaigns      *campaignStore
 	campaignRunner *campaignRunner
-	flowTracer *flowTracer
-	messages   *messageStore
-	auth       *authStore
-	loginLimit *loginLimiter
-	queues     *queueStore
-	tags       *tagStore
-	kanban     *kanbanStore
-	quickReplies *quickReplyStore
-	transcripts  *transcriptStore
-	businessHours *businessHoursStore
-	schedules    *scheduleStore
-	stt          *transcriber
-	sessStore  *sessionStore
-	chatMeta   *chatMetaStore
-	calls      *callStore
-	recSigner  *recordingSigner
-	settings   *settingsStore
-	db         *sql.DB
-	authStream *authStreamHub
-	cache      cache.Cache
+	flowTracer     *flowTracer
+	messages       *messageStore
+	auth           *authStore
+	loginLimit     *loginLimiter
+	queues         *queueStore
+	tags           *tagStore
+	kanban         *kanbanStore
+	quickReplies   *quickReplyStore
+	transcripts    *transcriptStore
+	businessHours  *businessHoursStore
+	schedules      *scheduleStore
+	stt            *transcriber
+	sessStore      *sessionStore
+	chatMeta       *chatMetaStore
+	calls          *callStore
+	recSigner      *recordingSigner
+	settings       *settingsStore
+	db             *sql.DB
+	authStream     *authStreamHub
+	cache          cache.Cache
+	supportStore   *supportStore
+	supportSvc     *SupportService
+	bindings       *deviceBindingStore
+	glpiClient     supportGLPIClient
+	tacticalClient supportTacticalClient
+	supportCfg     *supportConfig
 }
 
 func openDB(dbPath string) (*sql.DB, error) {
@@ -228,7 +238,61 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 			hub.Revoke(t)
 		}
 	}
-	srv := &server{broker: broker, sessions: mgr, log: log, staticDir: staticDir, flows: flows, flowExec: exec, flowTracer: tracer, messages: messages, auth: auth, loginLimit: newLoginLimiter(), queues: queues, tags: tags, kanban: kanban, quickReplies: quickReplies, transcripts: transcripts, businessHours: businessHours, schedules: schedules, stt: newTranscriber(), sessStore: store, chatMeta: chatMeta, calls: callStore, recSigner: signer, settings: settings, db: db, authStream: hub, cache: cch, campaigns: campaigns}
+
+	deviceBindings, err := newDeviceBindingStore(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	sStore, err := newSupportStore(ctx, db, DialectSQLite)
+	if err != nil {
+		return nil, err
+	}
+
+	supCfg, err := loadSupportConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	var glpiCli supportGLPIClient
+	var tacticalCli supportTacticalClient
+	var supSvc *SupportService
+
+	if supCfg.Enabled {
+		gc, err := glpi.New(supCfg.GLPIConfig)
+		if err != nil {
+			return nil, err
+		}
+		glpiCli = gc
+
+		if supCfg.TacticalConfig != nil {
+			tc, err := tactical.New(*supCfg.TacticalConfig)
+			if err != nil {
+				return nil, err
+			}
+			tacticalCli = tc
+		}
+
+		supSvc = NewSupportService(sStore, deviceBindings, glpiCli, tacticalCli)
+
+		// Synchronous orphan recovery on startup (single-instance invariant)
+		orphanAge := time.Duration(supCfg.CreateTimeoutSeconds+supCfg.RecoveryMarginSeconds) * time.Second
+		cutoff := time.Now().UTC().Add(-orphanAge).Unix()
+		if _, err := sStore.RecoverOrphanedProcessing(ctx, cutoff, nil); err != nil {
+			return nil, errors.New("support: failed to recover orphaned processing requests on boot")
+		}
+	}
+
+	srv := &server{
+		broker: broker, sessions: mgr, log: log, staticDir: staticDir,
+		flows: flows, flowExec: exec, flowTracer: tracer, messages: messages,
+		auth: auth, loginLimit: newLoginLimiter(), queues: queues, tags: tags,
+		kanban: kanban, quickReplies: quickReplies, transcripts: transcripts,
+		businessHours: businessHours, schedules: schedules, stt: newTranscriber(),
+		sessStore: store, chatMeta: chatMeta, calls: callStore, recSigner: signer,
+		settings: settings, db: db, authStream: hub, cache: cch, campaigns: campaigns,
+		supportStore: sStore, supportSvc: supSvc, bindings: deviceBindings,
+		glpiClient: glpiCli, tacticalClient: tacticalCli, supportCfg: &supCfg,
+	}
 	// Pending follow-ups are dropped as soon as the customer replies.
 	onInboundMessage = func(sessionID, chatJID string) {
 		_ = schedules.CancelFollowups(ctx, sessionID, chatJID)

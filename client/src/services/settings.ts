@@ -104,6 +104,12 @@ export type Options = {
   // coleta e os rótulos exibidos para o cliente.
   ratingMode?: "selection" | "comment" | "both";
   ratingOptions?: Array<{ value: number; label: string }>;
+  // Feature flags enviadas pelo backend (ex.: suporte GLPI e telemetria Tactical)
+  features?: {
+    support?: boolean;
+    tactical?: boolean;
+    [key: string]: unknown;
+  };
 };
 
 export const getOptions = () => req<Options>("/api/settings/options");

@@ -1,10 +1,10 @@
 # T-006 — Painel de Suporte GLPI + Tactical no Frontend
 
-Status: **especificação técnica e visual finalizada; implementação não iniciada**.
+Status: **aprovado pelo usuário (Opção 1: Sheet lateral); baseline documental commit `a8e19f4fe0d49f5ca84f9db02eb0b7b720afbe6a`; em implementação**.
 
 Esta especificação define exclusivamente a interface de usuário (UI/UX) do domínio de suporte técnico (GLPI + Tactical RMM) dentro do cockpit de conversas WhatsApp do WACalls ServiceOps, consumindo os endpoints internos publicados na T-005.
 
-> **Princípio de Integridade**: O frontend nunca se comunica diretamente com o GLPI ou Tactical RMM; todas as operações trafegam exclusivamente pela API interna do WACalls. Não há dashboard geral nesta tarefa (postergada para evolução posterior). Nenhuma alteração em código de produção (Go/TS/TSX/CSS) ou push deve ser feita nesta etapa de planejamento.
+> **Princípio de Integridade**: O frontend nunca se comunica diretamente com o GLPI ou Tactical RMM; todas as operações trafegam exclusivamente pela API interna do WACalls. Não há dashboard geral nesta tarefa (postergada para evolução posterior). O código de produção (Go/TS/TSX/CSS) e os testes frontend são implementados em commit próprio da T-006, sem realizar push até autorização formal.
 
 ---
 
@@ -506,12 +506,12 @@ O serviço encapsula `fetch` através da infraestrutura de `apiUrl` do WACalls c
 - **`features.support = false`**:
   - O botão de atalho no cabeçalho do chat (`Support` icon) **não é renderizado**.
   - Nenhuma requisição às rotas `/api/support/*` é disparada.
-- **`features.support = true` e `features.tactical = false`**:
-  - O painel de suporte opera normalmente para abertura, consulta e retry de chamados GLPI.
-  - A seção visual do Tactical RMM é omitida ou exibe um chip sutil informando "Telemetria Tactical desativada nesta implantação".
+- **`features.support = true` e `features.tactical = false` (Fallback Explícito)**:
+  - O painel de suporte opera de forma completa e irrestrita: o operador pode abrir chamados no GLPI, consultar o status da sincronização, efetuar retry, reconciliar (admin) e trocar o equipamento vinculado.
+  - A telemetria Tactical RMM é integralmente ocultada da interface (o componente de telemetria Tactical não é renderizado, e nenhum alerta ou warning de telemetria é gerado).
 - **`features.support = true` e `features.tactical = true` com falha de conexão**:
   - A resposta da API inclui `warnings: ["tactical_unavailable"]`.
-  - O painel exibe um alerta âmbar não impeditivo: *"Não foi possível consultar os dados em tempo real do computador no momento. A criação e o vínculo do chamado prosseguem normalmente."*
+  - O painel exibe um alerta âmbar não impeditivo seguro: *"Não foi possível consultar a telemetria em tempo real do computador no momento. A criação e o vínculo do chamado prosseguem normalmente."*
 
 ### 2. Tratamento de Respostas HTTP
 
@@ -658,17 +658,15 @@ client/src/services/settings.ts                // Tipagem das flags features.sup
 
 ---
 
-## M. Ambiguidades e Decisões Pendentes de Aprovação
+## M. Decisões Aprovadas pelo Usuário
 
-As seguintes decisões de produto e UX requerem alinhamento e autorização explícita do usuário antes do início do código da T-006:
-
-1. **Escolha do Layout**:
-   - **Opção 1 (Recomendada)**: Painel lateral deslizante (`Sheet` / Drawer à direita).
-   - **Opção 2**: Aba integrada substituindo o corpo da conversa.
-2. **Estratégia de Polling para `processing`**:
-   - Intervalo proposto: 3 segundos com timeout máximo de 15 segundos (5 tentativas).
-   - Confirmar se o polling curto atende ao fluxo operacional ou se prefere revalidação exclusivamente manual via botão.
-3. **Campos Iniciais do Formulário de Abertura**:
-   - Proposta: Exibir Solicitante, Título, Descrição, Equipamento e Prioridade como campos principais; manter Categoria e Localização como campos opcionais colapsáveis ("Opções avançadas").
-4. **Comportamento Mobile**:
-   - Confirmar se no mobile (< 768px) o drawer deve ocupar 100% da viewport como modal de tela cheia ao abrir o suporte.
+1. **Layout Escolhido**:
+   - **Opção 1 (Aprovada)**: Painel lateral deslizante (`Sheet` / Drawer à direita), utilizando o componente `@/components/ui/sheet` e seguindo o padrão de `ContactDetailsPanel`. Preserva 100% a timeline de mensagens do chat sem desmontagens.
+2. **Fallback Tactical Desabilitado**:
+   - Com `features.support=true` e `features.tactical=false`, o painel opera completamente para abertura e ciclo de vida do chamado GLPI, ocultando apenas a seção de telemetria Tactical.
+3. **Proteção de Idempotência**:
+   - Idempotency-Key estável mantida durante a submissão, com bloqueio imediato de submissão (anti-duplo clique).
+4. **Resolução de Ambiguidades**:
+   - Polling curto automático (3s, máx 5 tentativas) para chamados em estado `processing`.
+   - Campos essenciais visíveis (Solicitante, Título, Descrição, Equipamento, Prioridade) e campos avançados opcionais (Categoria, Localização).
+   - Mobile: Sheet ocupa tela cheia responsivamente (< 768px).

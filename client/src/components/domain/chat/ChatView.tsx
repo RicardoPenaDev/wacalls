@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { isCallRecordingEnabled } from "@/lib/call-recording-pref";
-import { ArrowLeft, CheckCheck, History, KanbanSquare, Mic, Paperclip, Phone, PhoneOff, Search, Send, Smile, UserPlus, Image as ImageIcon, FileText, Film, Contact2, Settings2, Signature, StickyNote, Workflow, Zap, Clock, X } from "lucide-react";
+import { ArrowLeft, CheckCheck, Headset, History, KanbanSquare, Mic, Paperclip, Phone, PhoneOff, Search, Send, Smile, UserPlus, Image as ImageIcon, FileText, Film, Contact2, Settings2, Signature, StickyNote, Workflow, Zap, Clock, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChats, setChatStatus } from "@/stores/chats";
 import { useAuth } from "@/stores/auth";
@@ -16,6 +16,7 @@ import { ForwardDialog } from "./ForwardDialog";
 import { KanbanLinkDialog } from "./KanbanLinkDialog";
 import { EmojiPicker } from "./EmojiPicker";
 import { ContactDetailsPanel } from "./ContactDetailsPanel";
+import { SupportPanel } from "@/components/domain/support/SupportPanel";
 import { ChatTagsManager } from "./ChatTagsManager";
 import type { Tag } from "@/types/tag";
 import { listChatTags } from "@/services/tags";
@@ -95,6 +96,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
   useEffect(() => {
     setShowSearch(false);
     setSearchTerm("");
+    setShowSupport(false);
   }, [chatJid]);
 
   useEffect(() => {
@@ -178,6 +180,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
   const [loadingFlows, setLoadingFlows] = useState(false);
   const [showKanban, setShowKanban] = useState(false);
   const [showContactDetails, setShowContactDetails] = useState(false);
+  const [showSupport, setShowSupport] = useState(false);
   const [chatTags, setChatTags] = useState<Tag[]>([]);
   // Kanban cards linked to this conversation. Rendered as small chips in
   // the header so the operator instantly sees which board/column tracks
@@ -306,6 +309,7 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const requireCloseReason = useOptionsStore((s) => !!s.options.requireCloseReason);
+  const supportEnabled = useOptionsStore((s) => !!s.options.features?.support);
   const imgInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
@@ -954,6 +958,18 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
           >
             <KanbanSquare className="h-4 w-4" />
           </Button>
+          {supportEnabled && (
+            <Button
+              size="sm"
+              variant={showSupport ? "secondary" : "ghost"}
+              title="Suporte Técnico (GLPI)"
+              className="inline-flex items-center gap-1 text-xs"
+              onClick={() => setShowSupport((v) => !v)}
+            >
+              <Headset className="h-4 w-4 text-primary" />
+              <span className="hidden lg:inline">Suporte</span>
+            </Button>
+          )}
           {!isGroup && status === "waiting" && (
             <>
               <Button
@@ -1622,6 +1638,15 @@ export const ChatView = ({ sessionId, chatJid, onBack, onStatusChange }: Props) 
           chat={chat}
           messages={messages}
           onTagsChange={setChatTags}
+        />
+      )}
+      {chatJid && supportEnabled && (
+        <SupportPanel
+          open={showSupport}
+          onOpenChange={setShowSupport}
+          sessionId={sessionId}
+          chatJid={chatJid}
+          chat={chat}
         />
       )}
       {chatJid && (

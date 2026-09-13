@@ -81,20 +81,24 @@ var validActions = map[SupportAction]bool{
 
 // Domain errors for Support domain persistence.
 var (
-	ErrSupportRequestNotFound  = errors.New("support request not found")
-	ErrIdempotencyKeyReused    = errors.New("idempotency key reused with different payload")
-	ErrStateConflict           = errors.New("support request state conflict")
-	ErrInvalidState            = errors.New("invalid support request state")
-	ErrInvalidIdempotencyKey   = errors.New("invalid idempotency key")
-	ErrInvalidFingerprint      = errors.New("invalid payload fingerprint")
-	ErrInvalidExternalID       = errors.New("invalid external id")
-	ErrInvalidProcessingToken  = errors.New("invalid processing token")
-	ErrMissingTenantID         = errors.New("tenant id required")
-	ErrMissingSessionOrChat    = errors.New("session id and chat jid required")
-	ErrMissingRequesterOrTitle = errors.New("requester name and title required")
-	ErrInvalidPriority         = errors.New("priority must be between 0 and 6")
-	ErrTokenLost               = errors.New("processing token lost or expired")
-	ErrUnsupportedDialect      = errors.New("unsupported sql dialect")
+	ErrSupportRequestNotFound      = errors.New("support request not found")
+	ErrIdempotencyKeyReused        = errors.New("idempotency key reused with different payload")
+	ErrStateConflict               = errors.New("support request state conflict")
+	ErrInvalidState                = errors.New("invalid support request state")
+	ErrInvalidIdempotencyKey       = errors.New("invalid idempotency key")
+	ErrInvalidFingerprint          = errors.New("invalid payload fingerprint")
+	ErrInvalidExternalID           = errors.New("invalid external id")
+	ErrInvalidProcessingToken      = errors.New("invalid processing token")
+	ErrMissingTenantID             = errors.New("tenant id required")
+	ErrMissingSessionOrChat        = errors.New("session id and chat jid required")
+	ErrMissingRequesterOrTitle     = errors.New("requester name and title required")
+	ErrInvalidPriority             = errors.New("priority must be between 0 and 6")
+	ErrTokenLost                   = errors.New("processing token lost or expired")
+	ErrUnsupportedDialect          = errors.New("unsupported sql dialect")
+	ErrDeviceMismatch              = errors.New("device binding does not match informed hostname")
+	ErrTicketNotFound              = errors.New("glpi ticket not found")
+	ErrReconcileExternalIDMismatch = errors.New("reconcile external_id mismatch")
+	ErrInvalidReconcileOutcome     = errors.New("invalid reconcile outcome")
 )
 
 // SupportRequest represents the persistent entity of a support ticket request.
@@ -190,6 +194,7 @@ type CreateSupportTicketInput struct {
 	PayloadFingerprint     string
 	ExternalID             string
 	ActorUserID            string
+	ProcessingToken        string
 }
 
 // EnrichSnapshotInput specifies snapshot enrichment conditioned on the active processing_token.

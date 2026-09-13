@@ -71,3 +71,10 @@ type CreatedTicket struct {
 	ID   string
 	Href string
 }
+
+// Ticket represents a GLPI ticket fetched via the High-Level API.
+type Ticket struct {
+	ID         string
+	Href       string
+	ExternalID string
+}

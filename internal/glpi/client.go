@@ -216,6 +216,28 @@ func (c *Client) CreateTicket(ctx context.Context, in TicketInput) (CreatedTicke
 	return CreatedTicket{ID: id, Href: wire.Href}, nil
 }
 
+// GetTicket returns one Ticket by its permanent GLPI ID.
+func (c *Client) GetTicket(ctx context.Context, id string) (Ticket, error) {
+	id = strings.TrimSpace(id)
+	numericID, parseErr := strconv.ParseInt(id, 10, 64)
+	if parseErr != nil || numericID <= 0 {
+		return Ticket{}, &Error{Op: "get ticket", Kind: ErrBadRequest}
+	}
+	body, err := c.get(ctx, ticketPath+"/"+id, nil)
+	if err != nil {
+		return Ticket{}, err
+	}
+	var wire ticketDTO
+	if err := decodeJSON(body, &wire); err != nil {
+		return Ticket{}, &Error{Op: "get ticket", Kind: ErrBadResponse}
+	}
+	ticket, err := mapTicket(wire, id)
+	if err != nil {
+		return Ticket{}, &Error{Op: "get ticket", Kind: ErrBadResponse}
+	}
+	return ticket, nil
+}
+
 func invalidIDReference(reference *IDReference) bool {
 	return reference != nil && reference.ID <= 0
 }
@@ -477,6 +499,8 @@ func operation(method, path string) string {
 		return "find computer"
 	case method == http.MethodGet && strings.HasPrefix(path, computerPath+"/"):
 		return "get computer"
+	case method == http.MethodGet && strings.HasPrefix(path, ticketPath+"/"):
+		return "get ticket"
 	case method == http.MethodPost && path == ticketPath:
 		return "create ticket"
 	default:
@@ -512,6 +536,50 @@ type computerDTO struct {
 type createdTicketDTO struct {
 	ID   json.Number `json:"id"`
 	Href string      `json:"href"`
+}
+
+type ticketDTO struct {
+	ID         json.Number `json:"id"`
+	Href       string      `json:"href"`
+	ExternalID string      `json:"external_id"`
+	Links      []struct {
+		Rel  string `json:"rel"`
+		Href string `json:"href"`
+	} `json:"links"`
+}
+
+func mapTicket(wire ticketDTO, fallbackID string) (Ticket, error) {
+	id := ""
+	if wire.ID != "" {
+		var err error
+		id, err = requiredNumber(wire.ID)
+		if err != nil {
+			return Ticket{}, err
+		}
+	} else if fallbackID != "" {
+		id = fallbackID
+	} else {
+		return Ticket{}, fmt.Errorf("missing ticket id")
+	}
+
+	href := strings.TrimSpace(wire.Href)
+	if href == "" {
+		for _, l := range wire.Links {
+			if strings.EqualFold(l.Rel, "self") && strings.TrimSpace(l.Href) != "" {
+				href = strings.TrimSpace(l.Href)
+				break
+			}
+		}
+	}
+	if href == "" {
+		href = ticketPath + "/" + id
+	}
+
+	return Ticket{
+		ID:         id,
+		Href:       href,
+		ExternalID: strings.TrimSpace(wire.ExternalID),
+	}, nil
 }
 
 func mapComputer(wire computerDTO) (Computer, error) {

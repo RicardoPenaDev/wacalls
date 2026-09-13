@@ -18,6 +18,7 @@ type glpiContract interface {
 	FindComputerByHostname(context.Context, string) (Computer, error)
 	GetComputer(context.Context, string) (Computer, error)
 	CreateTicket(context.Context, TicketInput) (CreatedTicket, error)
+	GetTicket(context.Context, string) (Ticket, error)
 }
 
 var _ glpiContract = (*Client)(nil)
@@ -676,4 +677,162 @@ func TestCrossHostRedirectIsBlocked(t *testing.T) {
 
 func strconvItoa(value int) string {
 	return fmt.Sprintf("%d", value)
+}
+
+func TestGetTicketSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == tokenPath {
+			writeToken(w, "token-get-ticket", 3600)
+			return
+		}
+		if r.URL.Path != ticketPath+"/77" || r.Method != http.MethodGet {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":77,"href":"/api.php/v2.3/Assistance/Ticket/77","external_id":"wacalls-ext-12345"}`)
+	}))
+	defer server.Close()
+
+	client := mustClient(t, testConfig(server.URL))
+	ticket, err := client.GetTicket(context.Background(), "77")
+	if err != nil {
+		t.Fatalf("GetTicket failed: %v", err)
+	}
+	if ticket.ID != "77" || ticket.Href != "/api.php/v2.3/Assistance/Ticket/77" || ticket.ExternalID != "wacalls-ext-12345" {
+		t.Fatalf("unexpected ticket: %+v", ticket)
+	}
+}
+
+func TestGetTicketInvalidIDWithoutRequest(t *testing.T) {
+	var serverRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverRequests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := mustClient(t, testConfig(server.URL))
+	for _, invalidID := range []string{"", "   ", "abc", "0", "-5", "1.5", "77/hack", "../1"} {
+		t.Run("id="+invalidID, func(t *testing.T) {
+			_, err := client.GetTicket(context.Background(), invalidID)
+			if !errors.Is(err, ErrBadRequest) {
+				t.Fatalf("expected ErrBadRequest for ID %q, got: %v", invalidID, err)
+			}
+		})
+	}
+	if serverRequests != 0 {
+		t.Fatalf("expected 0 server requests for invalid IDs, got %d", serverRequests)
+	}
+}
+
+func TestGetTicket401SingleTokenRenewal(t *testing.T) {
+	var tokenCalls atomic.Int32
+	var ticketCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == tokenPath {
+			call := tokenCalls.Add(1)
+			writeToken(w, fmt.Sprintf("renewed-token-%d", call), 3600)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, ticketPath+"/") {
+			ticketCalls.Add(1)
+			if r.Header.Get("Authorization") == "Bearer renewed-token-1" {
+				// First attempt with stale token receives 401
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if r.Header.Get("Authorization") == "Bearer renewed-token-2" {
+				// Second attempt with renewed token succeeds
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `{"id":42,"href":"/api.php/v2.3/Assistance/Ticket/42","external_id":"ext-42"}`)
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer server.Close()
+
+	client := mustClient(t, testConfig(server.URL))
+	ticket, err := client.GetTicket(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("GetTicket with 401 renewal failed: %v", err)
+	}
+	if ticket.ID != "42" || ticket.ExternalID != "ext-42" {
+		t.Fatalf("unexpected ticket after renewal: %+v", ticket)
+	}
+	if tokenCalls.Load() != 2 || ticketCalls.Load() != 2 {
+		t.Fatalf("calls: token=%d ticket=%d, want 2 and 2", tokenCalls.Load(), ticketCalls.Load())
+	}
+}
+
+func TestGetTicketNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == tokenPath {
+			writeToken(w, "token", 3600)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := mustClient(t, testConfig(server.URL))
+	_, err := client.GetTicket(context.Background(), "999")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+func TestGetTicketMalformedAndOversized(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"malformed", `{"id":`},
+		{"oversized", strings.Repeat("x", maxBodyBytes+1)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == tokenPath {
+					writeToken(w, "token", 3600)
+					return
+				}
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			client := mustClient(t, testConfig(server.URL))
+			_, err := client.GetTicket(context.Background(), "1")
+			if !errors.Is(err, ErrBadResponse) {
+				t.Fatalf("expected ErrBadResponse, got %v", err)
+			}
+		})
+	}
+}
+
+func TestGetTicketErrorsRedactSecretsBodiesAndURLs(t *testing.T) {
+	const bodySecret = "raw-ticket-body-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == tokenPath {
+			writeToken(w, "bearer-secret-ticket", 3600)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, bodySecret)
+	}))
+	defer server.Close()
+
+	cfg := testConfig(server.URL)
+	cfg.ClientSecret = "secret-client-token"
+	cfg.Password = "secret-password"
+	client := mustClient(t, cfg)
+	_, err := client.GetTicket(context.Background(), "88")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	text := err.Error()
+	for _, secret := range []string{cfg.ClientSecret, cfg.Password, "bearer-secret-ticket", bodySecret, server.URL} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("error leaked %q: %q", secret, text)
+		}
+	}
 }

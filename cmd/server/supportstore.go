@@ -218,9 +218,13 @@ func (s *supportStore) CreateTicketRequest(ctx context.Context, in CreateSupport
 	}
 
 	reqID := uuid.New().String()
-	token, err := GenerateProcessingToken()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate processing token: %w", err)
+	token := in.ProcessingToken
+	if token == "" {
+		var err error
+		token, err = GenerateProcessingToken()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate processing token: %w", err)
+		}
 	}
 
 	extID := in.ExternalID

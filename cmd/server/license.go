@@ -179,8 +179,13 @@ func machineFingerprint() string {
 	return hex.EncodeToString(sum[:])[:32]
 }
 
-// verifyLicense confere assinatura, máquina e validade.
+// verifyLicense confere assinatura, máquina e validade no instante atual.
 func verifyLicense(path, pubKeyB64 string) (licenseData, error) {
+	return verifyLicenseAt(path, pubKeyB64, licenseNow())
+}
+
+// verifyLicenseAt confere assinatura, máquina e validade no instante temporal especificado.
+func verifyLicenseAt(path, pubKeyB64 string, now time.Time) (licenseData, error) {
 	var vazio licenseData
 	if path == "" {
 		return vazio, errNoLicense
@@ -229,7 +234,7 @@ func verifyLicense(path, pubKeyB64 string) (licenseData, error) {
 	if err := json.Unmarshal(payload, &dados); err != nil {
 		return vazio, errors.New("conteudo da licenca ilegivel")
 	}
-	if dados.ExpiraEm > 0 && time.Now().Unix() > dados.ExpiraEm {
+	if dados.ExpiraEm > 0 && now.Unix() > dados.ExpiraEm {
 		return dados, fmt.Errorf("%w em %s", errLicenseExpired, time.Unix(dados.ExpiraEm, 0).Format("02/01/2006"))
 	}
 	if fp := machineFingerprint(); dados.Fingerprint != "" && dados.Fingerprint != fp {
@@ -282,10 +287,11 @@ func renewLicense(path string, atual licenseData) (licenseData, error) {
 		return atual, fmt.Errorf("servidor recusou a renovacao (HTTP %d)", resp.StatusCode)
 	}
 
+	now := licenseNow()
 	arquivo := licenseFile{
 		Licenca:   out.Licenca,
 		Codigo:    atual.Codigo,
-		AtivadaEm: time.Now().Format("2006-01-02 15:04:05"),
+		AtivadaEm: now.Format("2006-01-02 15:04:05"),
 	}
 	dadosArquivo, _ := json.MarshalIndent(arquivo, "", "  ")
 	destino := path
@@ -299,15 +305,20 @@ func renewLicense(path string, atual licenseData) (licenseData, error) {
 	if err := os.WriteFile(destino, dadosArquivo, 0o600); err != nil {
 		return atual, fmt.Errorf("nao consegui gravar %s: %w", destino, err)
 	}
-	return verifyLicense(destino, licensePubKey())
+	return verifyLicenseAt(destino, licensePubKey(), now)
 }
 
-// diasParaVencer devolve quantos dias faltam (negativo = já venceu).
+// diasParaVencer devolve quantos dias faltam (negativo = já venceu) usando o relógio atual.
 func diasParaVencer(d licenseData) int {
+	return diasParaVencerAt(d, licenseNow())
+}
+
+// diasParaVencerAt calcula quantos dias faltam a partir de um instante de referência.
+func diasParaVencerAt(d licenseData, now time.Time) int {
 	if d.ExpiraEm <= 0 {
 		return 1 << 30 // vitalícia
 	}
-	return int((d.ExpiraEm - time.Now().Unix()) / 86400)
+	return int((d.ExpiraEm - now.Unix()) / 86400)
 }
 
 // startLicenseWatcher renova a mensalidade em segundo plano. Roda a cada 12h e
@@ -344,12 +355,13 @@ func startLicenseWatcher(path, pubKey string, log licenseLogger) {
 // checkLicense roda no start. Só derruba o servidor quando a exigência está
 // ligada; caso contrário apenas registra o que encontrou.
 func checkLicense(flagPath, pubKey string, log licenseLogger) {
+	now := licenseNow()
 	path := licensePath(flagPath)
-	dados, err := verifyLicense(path, pubKey)
+	dados, err := verifyLicenseAt(path, pubKey, now)
 
 	// Vencida: tenta renovar na hora antes de reclamar. É o caminho normal de
 	// quem paga em dia e ficou uns dias com o computador desligado.
-	if errors.Is(err, errLicenseExpired) || (err == nil && diasParaVencer(dados) <= licenseRenewWindowDays) {
+	if errors.Is(err, errLicenseExpired) || (err == nil && diasParaVencerAt(dados, now) <= licenseRenewWindowDays) {
 		if novo, rerr := renewLicense(path, dados); rerr == nil {
 			dados, err = novo, nil
 			log.Info("licenca renovada no start", "validade", time.Unix(dados.ExpiraEm, 0).Format("02/01/2006"))
@@ -370,10 +382,10 @@ func checkLicense(flagPath, pubKey string, log licenseLogger) {
 	}
 
 	// Tolerância: vencida há poucos dias, o sistema continua funcionando.
-	if errors.Is(err, errLicenseExpired) && diasParaVencer(dados) >= -licenseGraceDays {
+	if errors.Is(err, errLicenseExpired) && diasParaVencerAt(dados, now) >= -licenseGraceDays {
 		log.Warn("assinatura vencida; funcionando em tolerancia",
 			"venceu_em", time.Unix(dados.ExpiraEm, 0).Format("02/01/2006"),
-			"dias_restantes_de_tolerancia", licenseGraceDays+diasParaVencer(dados))
+			"dias_restantes_de_tolerancia", licenseGraceDays+diasParaVencerAt(dados, now))
 		startLicenseWatcher(flagPath, pubKey, log)
 		return
 	}
@@ -441,6 +453,9 @@ func printLicenseInfo(flagPath string) {
 // reencontrar o mesmo arquivo que o checkLicense usou.
 var licenseFlagPath string
 
+// licenseNow permite controlar o relógio nos testes para cálculos determinísticos.
+var licenseNow = time.Now
+
 // licenseStatusView e o que o painel mostra na faixa de aviso. Nao leva e-mail
 // nem fingerprint: e uma tela que qualquer atendente pode abrir.
 type licenseStatusView struct {
@@ -463,13 +478,14 @@ const licenseSupportPhone = "81 99588-5670"
 // pequeno e uma verificacao Ed25519) e evita mostrar um estado velho logo
 // depois de o watcher renovar em segundo plano.
 func licenseStatus() licenseStatusView {
+	now := licenseNow()
 	v := licenseStatusView{Exigida: licenseRequired(), Suporte: licenseSupportPhone}
 	path := licensePath(licenseFlagPath)
 	if path == "" {
 		v.Motivo = "nenhuma licenca instalada"
 		return v
 	}
-	dados, err := verifyLicense(path, licensePubKey())
+	dados, err := verifyLicenseAt(path, licensePubKey(), now)
 	if err != nil && !errors.Is(err, errLicenseExpired) {
 		v.Motivo = err.Error()
 		return v
@@ -483,7 +499,7 @@ func licenseStatus() licenseStatusView {
 		v.DiasParaVencer = 1 << 30
 		return v
 	}
-	v.DiasParaVencer = diasParaVencer(dados)
+	v.DiasParaVencer = diasParaVencerAt(dados, now)
 	if err == nil {
 		v.Valida = true
 		return v

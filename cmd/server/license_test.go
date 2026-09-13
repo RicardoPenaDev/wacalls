@@ -14,7 +14,7 @@ import (
 // Monta uma licença assinada de verdade, do jeito que o Worker emite.
 func licencaDeTeste(t *testing.T, pub ed25519.PublicKey, priv ed25519.PrivateKey, fp string) string {
 	t.Helper()
-	return licencaComValidade(t, pub, priv, fp, time.Now().Add(33*24*time.Hour).Unix())
+	return licencaComValidade(t, pub, priv, fp, licenseNow().Add(33*24*time.Hour).Unix())
 }
 
 func licencaComValidade(t *testing.T, pub ed25519.PublicKey, priv ed25519.PrivateKey, fp string, expiraEm int64) string {
@@ -25,7 +25,7 @@ func licencaComValidade(t *testing.T, pub ed25519.PublicKey, priv ed25519.Privat
 		"fingerprint": fp,
 		"cliente":     "Cliente de Teste",
 		"plano":       "mensal",
-		"emitidoEm":   time.Now().Unix(),
+		"emitidoEm":   licenseNow().Unix(),
 		"expiraEm":    expiraEm,
 	})
 	if err != nil {
@@ -134,6 +134,28 @@ func TestVerifyLicenseRecusaOutraMaquina(t *testing.T) {
 	}
 }
 
+// Helpers para controle de estado global nos testes.
+// Testes que mutam licenseNow ou licenseFlagPath NÃO devem usar t.Parallel(),
+// pois alteram variáveis de pacote compartilhadas (além do t.Setenv proibir t.Parallel).
+
+func mockLicenseClock(t *testing.T, nowFn func() time.Time) {
+	t.Helper()
+	antes := licenseNow
+	licenseNow = nowFn
+	t.Cleanup(func() {
+		licenseNow = antes
+	})
+}
+
+func mockLicenseFlagPath(t *testing.T, path string) {
+	t.Helper()
+	antes := licenseFlagPath
+	licenseFlagPath = path
+	t.Cleanup(func() {
+		licenseFlagPath = antes
+	})
+}
+
 // A faixa de aviso do painel vive deste estado. O que importa aqui é a
 // fronteira: 7 dias de tolerância depois do vencimento o sistema ainda roda,
 // e no oitavo não roda mais — é exatamente o que o cliente vê.
@@ -141,6 +163,9 @@ func TestLicenseStatusFaixasDeVencimento(t *testing.T) {
 	pubB64, pub, priv := chaves(t)
 	t.Setenv("WACALLS_LICENSE_PUBKEY", pubB64)
 	t.Setenv("WACALLS_LICENSE_REQUIRED", "1")
+
+	fixo := time.Date(2026, time.September, 13, 12, 0, 0, 0, time.UTC)
+	mockLicenseClock(t, func() time.Time { return fixo })
 
 	dia := int64(24 * 60 * 60)
 	casos := []struct {
@@ -150,10 +175,10 @@ func TestLicenseStatusFaixasDeVencimento(t *testing.T) {
 		tolerancia   bool
 		diasEsperado int
 	}{
-		{"com folga", time.Now().Unix() + 20*dia, true, false, 20},
-		{"vence em 2 dias", time.Now().Unix() + 2*dia, true, false, 2},
-		{"venceu ha 3 dias", time.Now().Unix() - 3*dia, true, true, -3},
-		{"venceu ha 10 dias", time.Now().Unix() - 10*dia, false, false, -10},
+		{"com folga", fixo.Unix() + 20*dia, true, false, 20},
+		{"vence em 2 dias", fixo.Unix() + 2*dia, true, false, 2},
+		{"venceu ha 3 dias", fixo.Unix() - 3*dia, true, true, -3},
+		{"venceu ha 10 dias", fixo.Unix() - 10*dia, false, false, -10},
 	}
 
 	for _, c := range casos {
@@ -163,9 +188,7 @@ func TestLicenseStatusFaixasDeVencimento(t *testing.T) {
 			if err := os.WriteFile(caminho, []byte(lic), 0o600); err != nil {
 				t.Fatalf("gravando: %v", err)
 			}
-			antes := licenseFlagPath
-			licenseFlagPath = caminho
-			defer func() { licenseFlagPath = antes }()
+			mockLicenseFlagPath(t, caminho)
 
 			st := licenseStatus()
 			if !st.Exigida {
@@ -190,12 +213,203 @@ func TestLicenseStatusFaixasDeVencimento(t *testing.T) {
 	}
 }
 
+// Testa exatamente os limites de cada faixa e um instante antes e depois.
+func TestLicenseStatusLimitesEInstantes(t *testing.T) {
+	pubB64, pub, priv := chaves(t)
+	t.Setenv("WACALLS_LICENSE_PUBKEY", pubB64)
+	t.Setenv("WACALLS_LICENSE_REQUIRED", "1")
+
+	fixo := time.Date(2026, time.September, 13, 12, 0, 0, 0, time.UTC)
+	mockLicenseClock(t, func() time.Time { return fixo })
+
+	const dia = int64(86400)
+	now := fixo.Unix()
+
+	casos := []struct {
+		nome           string
+		expiraEm       int64
+		validaEsperada bool
+		emTolerancia   bool
+		diasParaVencer int
+		diasTolerancia int
+	}{
+		{"exatamente no segundo da expiracao", now, true, false, 0, 0},
+		{"1 segundo antes de expirar", now + 1, true, false, 0, 0},
+		{"1 segundo apos expirar entra em tolerancia", now - 1, true, true, 0, 7},
+		{"exatamente 1 dia para vencer", now + dia, true, false, 1, 0},
+		{"1 segundo a menos que 1 dia para vencer", now + dia - 1, true, false, 0, 0},
+		{"1 segundo a mais que 1 dia para vencer", now + dia + 1, true, false, 1, 0},
+		{"exatamente 7 dias para vencer janela renovacao", now + 7*dia, true, false, 7, 0},
+		{"exatamente 7 dias vencida limite tolerancia", now - 7*dia, true, true, -7, 0},
+		{"1 segundo antes de esgotar 7 dias de tolerancia", now - 7*dia + 1, true, true, -6, 1},
+		{"1 segundo apos 7 dias vencida ainda no 7o dia", now - 7*dia - 1, true, true, -7, 0},
+		{"exatamente 8 dias vencida tolerancia esgotada", now - 8*dia, false, false, -8, 0},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			caminho := filepath.Join(t.TempDir(), "licenca.json")
+			lic := licencaComValidade(t, pub, priv, machineFingerprint(), c.expiraEm)
+			if err := os.WriteFile(caminho, []byte(lic), 0o600); err != nil {
+				t.Fatalf("gravando: %v", err)
+			}
+			mockLicenseFlagPath(t, caminho)
+
+			st := licenseStatus()
+			if st.Valida != c.validaEsperada {
+				t.Fatalf("valida = %v, esperado %v (motivo: %s)", st.Valida, c.validaEsperada, st.Motivo)
+			}
+			if st.EmTolerancia != c.emTolerancia {
+				t.Fatalf("emTolerancia = %v, esperado %v", st.EmTolerancia, c.emTolerancia)
+			}
+			if st.DiasParaVencer != c.diasParaVencer {
+				t.Fatalf("diasParaVencer = %d, esperado %d", st.DiasParaVencer, c.diasParaVencer)
+			}
+			if c.emTolerancia && st.DiasTolerancia != c.diasTolerancia {
+				t.Fatalf("diasTolerancia = %d, esperado %d", st.DiasTolerancia, c.diasTolerancia)
+			}
+		})
+	}
+}
+
+// Testa a estabilidade do cálculo através de viradas de dia, mês, ano e anos bissextos.
+func TestLicenseStatusViradaDeDiaEData(t *testing.T) {
+	pubB64, pub, priv := chaves(t)
+	t.Setenv("WACALLS_LICENSE_PUBKEY", pubB64)
+	t.Setenv("WACALLS_LICENSE_REQUIRED", "1")
+
+	const dia = int64(86400)
+	instantes := []struct {
+		nome string
+		now  time.Time
+	}{
+		{"23:59:59 fim do dia", time.Date(2026, 9, 13, 23, 59, 59, 0, time.UTC)},
+		{"00:00:00 meia-noite", time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)},
+		{"00:00:01 inicio do dia", time.Date(2026, 9, 14, 0, 0, 1, 0, time.UTC)},
+		{"virada de mes 28 de fev", time.Date(2026, 2, 28, 23, 59, 59, 0, time.UTC)},
+		{"virada de mes 01 de mar", time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+		{"virada de ano 31 de dez", time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC)},
+		{"virada de ano 01 de jan", time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"ano bissexto 28 de fev", time.Date(2028, 2, 28, 12, 0, 0, 0, time.UTC)},
+		{"ano bissexto 29 de fev", time.Date(2028, 2, 29, 12, 0, 0, 0, time.UTC)},
+	}
+
+	for _, inst := range instantes {
+		t.Run(inst.nome, func(t *testing.T) {
+			mockLicenseClock(t, func() time.Time { return inst.now })
+
+			caminho := filepath.Join(t.TempDir(), "licenca.json")
+			expira := inst.now.Unix() + 5*dia
+			lic := licencaComValidade(t, pub, priv, machineFingerprint(), expira)
+			if err := os.WriteFile(caminho, []byte(lic), 0o600); err != nil {
+				t.Fatalf("gravando: %v", err)
+			}
+			mockLicenseFlagPath(t, caminho)
+
+			st := licenseStatus()
+			if !st.Valida {
+				t.Fatalf("esperava licenca valida na transicao %s (motivo: %s)", inst.nome, st.Motivo)
+			}
+			if st.DiasParaVencer != 5 {
+				t.Fatalf("esperava 5 dias para vencer em %s, obteve %d", inst.nome, st.DiasParaVencer)
+			}
+		})
+	}
+}
+
+// Testa a consistência determinística sob fusos UTC e America/Sao_Paulo.
+func TestLicenseStatusTimezonesUTCeSP(t *testing.T) {
+	pubB64, pub, priv := chaves(t)
+	t.Setenv("WACALLS_LICENSE_PUBKEY", pubB64)
+	t.Setenv("WACALLS_LICENSE_REQUIRED", "1")
+
+	spLoc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("carregando timezone America/Sao_Paulo: %v", err)
+	}
+
+	const dia = int64(86400)
+	baseUTC := time.Date(2026, 9, 13, 15, 0, 0, 0, time.UTC)
+	baseSP := baseUTC.In(spLoc) // Mesmo instante absoluto (12:00:00 UTC-3)
+
+	for _, c := range []struct {
+		nome string
+		now  time.Time
+	}{
+		{"fuso UTC", baseUTC},
+		{"fuso America/Sao_Paulo", baseSP},
+	} {
+		t.Run(c.nome, func(t *testing.T) {
+			mockLicenseClock(t, func() time.Time { return c.now })
+
+			caminho := filepath.Join(t.TempDir(), "licenca.json")
+			expira := c.now.Unix() + 3*dia
+			lic := licencaComValidade(t, pub, priv, machineFingerprint(), expira)
+			if err := os.WriteFile(caminho, []byte(lic), 0o600); err != nil {
+				t.Fatalf("gravando: %v", err)
+			}
+			mockLicenseFlagPath(t, caminho)
+
+			st := licenseStatus()
+			if !st.Valida {
+				t.Fatalf("licenca deveria ser valida em %s: %s", c.nome, st.Motivo)
+			}
+			if st.DiasParaVencer != 3 {
+				t.Fatalf("diasParaVencer = %d, esperado 3 em %s", st.DiasParaVencer, c.nome)
+			}
+		})
+	}
+}
+
+// TestLicenseStatusConsultaRelogioUmaUnicaVez comprova deterministicamente que licenseStatus
+// captura o relógio uma única vez por operação (eliminando janela de inconsistência).
+func TestLicenseStatusConsultaRelogioUmaUnicaVez(t *testing.T) {
+	pubB64, pub, priv := chaves(t)
+	t.Setenv("WACALLS_LICENSE_PUBKEY", pubB64)
+	t.Setenv("WACALLS_LICENSE_REQUIRED", "1")
+
+	casos := []struct {
+		nome     string
+		expiraEm func(time.Time) int64
+	}{
+		{"licenca valida", func(b time.Time) int64 { return b.Unix() + 5*86400 }},
+		{"licenca em tolerancia", func(b time.Time) int64 { return b.Unix() - 2*86400 }},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			base := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+			chamadas := 0
+			mockLicenseClock(t, func() time.Time {
+				chamadas++
+				return base.Add(time.Duration(chamadas) * time.Second)
+			})
+
+			caminho := filepath.Join(t.TempDir(), "licenca.json")
+			lic := licencaComValidade(t, pub, priv, machineFingerprint(), c.expiraEm(base))
+			if err := os.WriteFile(caminho, []byte(lic), 0o600); err != nil {
+				t.Fatalf("gravando: %v", err)
+			}
+			mockLicenseFlagPath(t, caminho)
+
+			// Zera o contador logo antes de chamar licenseStatus para medir exclusivamente
+			// as consultas ao relógio efetuadas por esta operação composta.
+			chamadas = 0
+			st := licenseStatus()
+			if !st.Valida {
+				t.Fatalf("licenca deveria ser valida: %s", st.Motivo)
+			}
+			if chamadas != 1 {
+				t.Fatalf("licenseStatus consultou licenseNow %d vezes, esperado exatamente 1", chamadas)
+			}
+		})
+	}
+}
+
 // Sem arquivo nenhum a API não pode explodir nem mentir que está válida.
 func TestLicenseStatusSemArquivo(t *testing.T) {
 	t.Setenv("WACALLS_LICENSE_REQUIRED", "0")
-	antes := licenseFlagPath
-	licenseFlagPath = filepath.Join(t.TempDir(), "nao-existe.json")
-	defer func() { licenseFlagPath = antes }()
+	mockLicenseFlagPath(t, filepath.Join(t.TempDir(), "nao-existe.json"))
 
 	// Sem arquivo o licensePath cai na pasta de trabalho; garante que ali
 	// tambem nao ha licenca.

@@ -188,7 +188,7 @@ A tarefa **T-007** é o marco final de encerramento da **Fase 1 (MVP GLPI + Tact
 
 A Fase 1 (MVP GLPI + Tactical) será considerada formalmente concluída somente quando todos os critérios a seguir forem plenamente atendidos:
 
-1. [ ] **Teste de Licença / Timezone Estável**: Diagnóstico realizado e teste `TestLicenseStatusFaixasDeVencimento` corrigido deterministicamente sem skips ou sleeps.
+1. [x] **Teste de Licença / Timezone Estável**: Diagnóstico realizado e teste `TestLicenseStatusFaixasDeVencimento` corrigido deterministicamente sem skips ou sleeps (suíte Go global 100% verde).
 2. [ ] **Build Go Global Aprovado**: `go build ./...` executado com sucesso e zero erros.
 3. [ ] **Suíte Go Global 100% Verde**: `go test ./...` executado com aprovação integral em todos os pacotes.
 4. [ ] **Frontend Build e Testes Aprovados**: `npm run build` e `npm run test` no client executados com zero falhas.
@@ -207,7 +207,7 @@ A execução da T-007 será realizada rigorosamente segundo o fatiamento abaixo,
 
 | Etapa | Escopo Técnico | Arquivos Reais Envolvidos | Testes & Comandos de Validação | Checkpoint em STATUS.md | Autorização Prévia do Usuário |
 |---|---|---|---|---|---|
-| **7.1** | **Diagnóstico e Correção do Teste de Licença**: Reprodução sob UTC e America/Sao_Paulo, limites de data, identificação da causa e correção determinística sem tolerância arbitrária | `cmd/server/license.go`, `cmd/server/license_test.go` | `go test -count=10 -run TestLicenseStatusFaixasDeVencimento ./cmd/server` e `go test ./...` | Suíte Go global 100% verde | **Exige autorização prévia antes de editar arquivos** |
+| **7.1** | **Diagnóstico e Correção do Teste de Licença**: Concluída. Clock controlável injetado via `licenseNow`, testes de borda/virada/fuso adicionados; suíte Go 100% verde | `cmd/server/license.go`, `cmd/server/license_test.go` | `go test -run '^TestLicense' -count=50` e `go test ./...` | Suíte Go global 100% verde | **Concluída (autorizada)** |
 | **7.2** | **Hardening do Link GLPI**: Deliberação da decisão pendente (Opção A, B ou Opção C fallback seguro), validação de esquema (`https:`), sanitização, `rel="noopener noreferrer"` e tratamento seguro para links inválidos | `client/src/components/domain/support/SupportRequestStatus.tsx`, `client/src/types/support.ts`, `client/tests/support.test.mjs`, `cmd/server/supportservice.go`, `cmd/server/supportapi.go` | `npm --prefix client run test` e `npm --prefix client run build` | Hardening do link GLPI concluído e testado | **Exige autorização prévia antes de editar arquivos** |
 | **7.3** | **Suíte E2E Permanente**: Especificação de runner leve sem adições pesadas não autorizadas, orquestrador de backend/mock em portas dinâmicas, timeout de 30s, contagem exata de POSTs e encerramento limpo | `client/tests/e2e/support.e2e.test.mjs` (ou caminho equivalente), `client/package.json` | `npm --prefix client run test:e2e` | Suíte E2E permanente versionada e aprovada | **Exige autorização prévia antes de criar dependências ou scripts** |
 | **7.4** | **Homologação Real Controlada**: Execução assistida no ambiente de teste pessoal de Ricardo com dados sintéticos, chamado identificado `[HOMOLOG-WACALLS-T007]` e encerramento via operação oficial ou registro manual | Procedimento operacional (sem alteração de código) | Chamadas controladas via backend WACalls no ambiente de teste pessoal | Homologação pessoal concluída com evidências | **Autorização obrigatória imediatamente antes de qualquer chamada real** |

@@ -8,12 +8,30 @@ interface Props {
   requestId: string;
   onSuccess: (envelope: SupportTicketResponseEnvelope) => void;
   disabled?: boolean;
+  /**
+   * Absolute epoch-ms deadline until which retry stays blocked, derived by
+   * the caller from the persisted `updatedAt` of a `rate_limited` request
+   * (GLPI's Retry-After window survives reloads this way — the raw header
+   * value itself is never persisted or re-transmitted by the backend).
+   */
+  retryAfterUntil?: number;
 }
 
-export const RetryAction = ({ requestId, onSuccess, disabled = false }: Props) => {
+export const RetryAction = ({ requestId, onSuccess, disabled = false, retryAfterUntil }: Props) => {
   const [retrying, setRetrying] = useState(false);
-  const [countdown, setCountdown] = useState<number>(0);
+  const [countdown, setCountdown] = useState<number>(() =>
+    retryAfterUntil ? Math.max(0, Math.ceil((retryAfterUntil - Date.now()) / 1000)) : 0,
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Re-arms the countdown whenever the server hands us a new rate-limit
+  // deadline (initial creation 429, or a fresh 429 on a later retry
+  // attempt) — not on every render, since retryAfterUntil only changes
+  // when the persisted request actually changes.
+  useEffect(() => {
+    if (!retryAfterUntil) return;
+    setCountdown(Math.max(0, Math.ceil((retryAfterUntil - Date.now()) / 1000)));
+  }, [retryAfterUntil]);
 
   useEffect(() => {
     if (countdown <= 0) return;
@@ -33,12 +51,7 @@ export const RetryAction = ({ requestId, onSuccess, disabled = false }: Props) =
       onSuccess(response);
     } catch (err: any) {
       if (err instanceof SupportApiError) {
-        if (err.status === 429 && err.retryAfterSeconds) {
-          setCountdown(err.retryAfterSeconds);
-          setErrorMsg(`Muitas requisições. Aguarde ${err.retryAfterSeconds}s para tentar novamente.`);
-        } else {
-          setErrorMsg(err.message || `Erro ${err.status}: falha no retry.`);
-        }
+        setErrorMsg(err.message || `Erro ${err.status}: falha no retry.`);
       } else {
         setErrorMsg(err?.message || "Falha na comunicação ao tentar novamente.");
       }

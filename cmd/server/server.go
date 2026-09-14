@@ -47,7 +47,7 @@ type server struct {
 	authStream     *authStreamHub
 	cache          cache.Cache
 	supportStore   *supportStore
-	supportSvc     *SupportService
+	supportSvc     supportServiceAPI
 	bindings       *deviceBindingStore
 	glpiClient     supportGLPIClient
 	tacticalClient supportTacticalClient
@@ -64,7 +64,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log *slog.Logger) (*server, error) {
+func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, supCfg supportConfig, log *slog.Logger) (*server, error) {
 	cfg := storage.FromEnv(dbPath)
 	db, waDriver, err := storage.Open(cfg)
 	if err != nil {
@@ -248,10 +248,10 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 		return nil, err
 	}
 
-	supCfg, err := loadSupportConfig()
-	if err != nil {
-		return nil, err
-	}
+	// supCfg was already loaded and validated once by precheckE2EBoot (see
+	// cmd/server/e2e_mode.go), called from main() before newServer runs.
+	// Do not re-load or re-validate it here — that would reintroduce the
+	// duplicate-validation gap a prior audit flagged.
 
 	var glpiCli supportGLPIClient
 	var tacticalCli supportTacticalClient

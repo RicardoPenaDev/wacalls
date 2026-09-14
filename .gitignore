@@ -50,3 +50,7 @@ licenca.json
 # binario que o `go build ./cmd/server` deixa na raiz
 /server
 /wacalls
+
+# Artefatos temporarios de execucao E2E
+client/test-results/
+test-results/

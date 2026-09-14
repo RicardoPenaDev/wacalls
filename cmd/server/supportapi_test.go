@@ -78,7 +78,7 @@ func setupSupportAPITest(t *testing.T, supportEnabled bool, tacticalConfigured b
 	mockG := &mockGLPIClient{}
 	mockT := &mockTacticalClient{}
 
-	var supSvc *SupportService
+	var supSvc supportServiceAPI
 	var glpiCli supportGLPIClient
 	var tacticalCli supportTacticalClient
 
@@ -1104,4 +1104,377 @@ func TestSupportAPI_ReconcileAdminPermissions(t *testing.T) {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+type spySupportService struct {
+	supportServiceAPI
+	createTicketCalls int
+	retryCalls        int
+	failCreateResNil  bool
+	failRetryResNil   bool
+}
+
+func (s *spySupportService) CreateTicket(ctx context.Context, in ServiceCreateTicketInput) (*ServiceCreateTicketResult, error) {
+	s.createTicketCalls++
+	if s.failCreateResNil {
+		return nil, errors.New("underlying DB failure during create ticket")
+	}
+	return s.supportServiceAPI.CreateTicket(ctx, in)
+}
+
+func (s *spySupportService) Retry(ctx context.Context, in ServiceRetryInput) (*SupportRequest, error) {
+	s.retryCalls++
+	if s.failRetryResNil {
+		return nil, errors.New("underlying DB failure during retry")
+	}
+	return s.supportServiceAPI.Retry(ctx, in)
+}
+
+// 12. GLPI classified error -> HTTP status code mapping for ticket creation.
+func TestSupportAPI_CreateTicket_GLPIErrorStatusMapping(t *testing.T) {
+	assertNoInternalLeak := func(t *testing.T, body []byte) {
+		t.Helper()
+		raw := string(body)
+		for _, s := range []string{"processingToken", "payloadFingerprint", "glpiTicketHref"} {
+			if strings.Contains(raw, s) {
+				t.Fatalf("internal field %q leaked in response body: %s", s, raw)
+			}
+		}
+	}
+
+	setup := setupSupportAPITest(t, true, false)
+	h := setup.srv.routes()
+
+	cases := []struct {
+		name              string
+		glpiErr           error
+		wantStatus        int
+		wantRetryAfter    string
+		wantSyncState     string
+		wantLastErrorCode string
+	}{
+		{
+			// classifyGLPIError: StatusCode 429 -> StateRetryableError, "rate_limited".
+			// handler: StateRetryableError + rate_limited -> 429 + Retry-After: 60.
+			name:              "rate_limited_429",
+			glpiErr:           &glpi.Error{Op: "create ticket", StatusCode: 429, RetryAfter: 60 * time.Second},
+			wantStatus:        http.StatusTooManyRequests,
+			wantRetryAfter:    "60",
+			wantSyncState:     "retryable_error",
+			wantLastErrorCode: "rate_limited",
+		},
+		{
+			// classifyGLPIError: StatusCode 401 -> StateRetryableError, "integration_auth_failed".
+			// handler: StateRetryableError + integration_auth_failed -> 502 Bad Gateway with safe envelope.
+			name:              "integration_auth_failed_401",
+			glpiErr:           &glpi.Error{Op: "create ticket", StatusCode: 401},
+			wantStatus:        http.StatusBadGateway,
+			wantSyncState:     "retryable_error",
+			wantLastErrorCode: "integration_auth_failed",
+		},
+		{
+			// classifyGLPIError: error is not a *glpi.Error (errors.As fails) -> default
+			// branch -> StateUnknown, "ticket_result_unknown".
+			// handler: StateUnknown -> 202 Accepted (confirmed from the actual switch in
+			// handleCreateChatSupportTicket; StateUnknown is NOT mapped to 503/500).
+			name:              "unclassified_transport_failure_unknown",
+			glpiErr:           errors.New("transport failure"),
+			wantStatus:        http.StatusAccepted,
+			wantSyncState:     "unknown",
+			wantLastErrorCode: "ticket_result_unknown",
+		},
+		{
+			// classifyGLPIError: StatusCode 400 -> StateFailed, "ticket_rejected".
+			// handler: StateFailed -> 502 Bad Gateway.
+			name:              "bad_request_400_failed",
+			glpiErr:           &glpi.Error{Op: "create ticket", StatusCode: 400},
+			wantStatus:        http.StatusBadGateway,
+			wantSyncState:     "failed",
+			wantLastErrorCode: "ticket_rejected",
+		},
+	}
+
+	for i, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			setup.mockGLPI.createTicketFn = func(ctx context.Context, in glpi.TicketInput) (glpi.CreatedTicket, error) {
+				return glpi.CreatedTicket{}, tc.glpiErr
+			}
+
+			createReq := CreateSupportTicketReq{
+				RequesterName: "Maria Silva",
+				Title:         fmt.Sprintf("GLPI Error Mapping %d", i),
+				Description:   "Verifying GLPI classified error status mapping.",
+				Priority:      3,
+			}
+			bodyBytes, _ := json.Marshal(createReq)
+
+			rec := doRequest(h, "POST", fmt.Sprintf("/api/sessions/%s/chats/%s/support/ticket", setup.sess1ID, setup.chat1JID), setup.user1Token, bodyBytes, map[string]string{
+				"Content-Type":    "application/json",
+				"Idempotency-Key": fmt.Sprintf("idemp-glpi-status-map-%d", i),
+			})
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d. body: %s", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tc.wantRetryAfter != "" {
+				if got := rec.Header().Get("Retry-After"); got != tc.wantRetryAfter {
+					t.Fatalf("expected Retry-After %q, got %q", tc.wantRetryAfter, got)
+				}
+			} else if got := rec.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("unexpected Retry-After header %q", got)
+			}
+
+			var respEnv SupportTicketResponseEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &respEnv); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if respEnv.SupportRequest.SyncState != tc.wantSyncState {
+				t.Fatalf("expected syncState %q, got %q", tc.wantSyncState, respEnv.SupportRequest.SyncState)
+			}
+			gotLastErrorCode := ""
+			if respEnv.SupportRequest.LastErrorCode != nil {
+				gotLastErrorCode = *respEnv.SupportRequest.LastErrorCode
+			}
+			if gotLastErrorCode != tc.wantLastErrorCode {
+				t.Fatalf("expected lastErrorCode %q, got %q", tc.wantLastErrorCode, gotLastErrorCode)
+			}
+
+			assertNoInternalLeak(t, rec.Body.Bytes())
+		})
+	}
+
+	// Internal error / res == nil path (500 internal_error):
+	// Reaches handleCreateChatSupportTicket, passes through device binding
+	// resolution, invokes SupportService.CreateTicket, and when CreateTicket
+	// returns res=nil and err!=nil, hits the exact res==nil guard in supportapi.go.
+	t.Run("create_ticket_res_nil_guard_hits_500", func(t *testing.T) {
+		ctx := context.Background()
+		b1, err := setup.bStore.Upsert(ctx, DeviceBinding{
+			ID:                 "binding-test-res-nil-01",
+			OwnerID:            setup.user1ID,
+			TenantID:           setup.user1ID,
+			Hostname:           "PC-RES-NIL",
+			HostnameNormalized: "PC-RES-NIL",
+			MatchStatus:        "matched",
+		})
+		if err != nil {
+			t.Fatalf("failed to insert test device binding: %v", err)
+		}
+
+		spy := &spySupportService{
+			supportServiceAPI: setup.srv.supportSvc,
+			failCreateResNil:  true,
+		}
+		setup.srv.supportSvc = spy
+		t.Cleanup(func() {
+			setup.srv.supportSvc = spy.supportServiceAPI
+		})
+
+		createReq := CreateSupportTicketReq{
+			RequesterName:   "Maria Silva",
+			Title:           "Internal Error Res Nil",
+			Description:     "Verifying 500 when service returns res=nil.",
+			DeviceBindingID: &b1.ID,
+			Priority:        3,
+		}
+		bodyBytes, _ := json.Marshal(createReq)
+
+		rec := doRequest(h, "POST", fmt.Sprintf("/api/sessions/%s/chats/%s/support/ticket", setup.sess1ID, setup.chat1JID), setup.user1Token, bodyBytes, map[string]string{
+			"Content-Type":    "application/json",
+			"Idempotency-Key": "idemp-create-ticket-res-nil-guard-500",
+		})
+
+		if spy.createTicketCalls != 1 {
+			t.Fatalf("expected exactly 1 call to CreateTicket, got %d", spy.createTicketCalls)
+		}
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected status 500, got %d. body: %s", rec.Code, rec.Body.String())
+		}
+		var errEnv SupportErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &errEnv); err != nil {
+			t.Fatalf("failed to unmarshal error response: %v", err)
+		}
+		if errEnv.Error.Code != "internal_error" {
+			t.Fatalf("expected error code internal_error, got %q", errEnv.Error.Code)
+		}
+		if errEnv.Error.Message != "failed to create support ticket" {
+			t.Fatalf("expected message 'failed to create support ticket', got %q", errEnv.Error.Message)
+		}
+		if strings.Contains(rec.Body.String(), "supportRequest") {
+			t.Fatalf("response body must not contain partial supportRequest DTO: %s", rec.Body.String())
+		}
+		assertNoInternalLeak(t, rec.Body.Bytes())
+	})
+}
+
+// 13. GLPI classified error -> HTTP status code mapping for ticket retry.
+func TestSupportAPI_Retry_GLPIErrorStatusMapping(t *testing.T) {
+	setup := setupSupportAPITest(t, true, false)
+	h := setup.srv.routes()
+	ctx := context.Background()
+
+	assertNoInternalLeak := func(t *testing.T, body []byte) {
+		t.Helper()
+		raw := string(body)
+		for _, s := range []string{"processingToken", "payloadFingerprint", "glpiTicketHref"} {
+			if strings.Contains(raw, s) {
+				t.Fatalf("internal field %q leaked in response body: %s", s, raw)
+			}
+		}
+	}
+
+	newRetryableRequest := func(t *testing.T, idempKey, externalID, procToken string) *SupportRequest {
+		t.Helper()
+		req, err := setup.store.CreateTicketRequest(ctx, CreateSupportTicketInput{
+			OwnerID:            setup.user1ID,
+			TenantID:           setup.user1ID,
+			SessionID:          setup.sess1ID,
+			ChatJID:            setup.chat1JID,
+			RequesterName:      "Maria",
+			Title:              "Retry Status Mapping",
+			Description:        "Desc",
+			IdempotencyKey:     idempKey,
+			ExternalID:         externalID,
+			ActorUserID:        setup.user1ID,
+			ProcessingToken:    procToken,
+			HostnameInformed:   "PC-1",
+			PayloadFingerprint: strings.Repeat("a", 64),
+		})
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		if err := setup.store.FinishProcessing(ctx, FinishProcessingInput{
+			ID:              req.ID,
+			TenantID:        setup.user1ID,
+			ProcessingToken: req.ProcessingToken,
+			TargetState:     StateRetryableError,
+			LastErrorCode:   "glpi_auth_failed",
+			ActorUserID:     &setup.user1ID,
+		}); err != nil {
+			t.Fatalf("failed to finish processing: %v", err)
+		}
+		return req
+	}
+
+	cases := []struct {
+		name              string
+		glpiErr           error
+		wantStatus        int
+		wantRetryAfter    string
+		wantSyncState     string
+		wantLastErrorCode string
+	}{
+		{
+			// classifyGLPIError: StatusCode 429 -> StateRetryableError, "rate_limited".
+			// handler: StateRetryableError + rate_limited -> 429 + Retry-After: 60.
+			name:              "rate_limited_429",
+			glpiErr:           &glpi.Error{Op: "create ticket", StatusCode: 429, RetryAfter: 60 * time.Second},
+			wantStatus:        http.StatusTooManyRequests,
+			wantRetryAfter:    "60",
+			wantSyncState:     "retryable_error",
+			wantLastErrorCode: "rate_limited",
+		},
+		{
+			// classifyGLPIError: StatusCode 401 -> StateRetryableError, "integration_auth_failed".
+			// handler: StateRetryableError + integration_auth_failed -> 502 Bad Gateway with safe envelope.
+			name:              "integration_auth_failed_401",
+			glpiErr:           &glpi.Error{Op: "create ticket", StatusCode: 401},
+			wantStatus:        http.StatusBadGateway,
+			wantSyncState:     "retryable_error",
+			wantLastErrorCode: "integration_auth_failed",
+		},
+		{
+			// classifyGLPIError: StatusCode 400 -> StateFailed, "ticket_rejected".
+			// handler: StateFailed -> 502 Bad Gateway.
+			name:              "bad_request_400_failed",
+			glpiErr:           &glpi.Error{Op: "create ticket", StatusCode: 400},
+			wantStatus:        http.StatusBadGateway,
+			wantSyncState:     "failed",
+			wantLastErrorCode: "ticket_rejected",
+		},
+	}
+
+	for i, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := newRetryableRequest(t,
+				fmt.Sprintf("idemp-retry-status-map-%d", i),
+				fmt.Sprintf("ext-retry-status-map-%d", i),
+				fmt.Sprintf("tok-retry-status-map-%d", i))
+
+			setup.mockGLPI.createTicketFn = func(ctx context.Context, in glpi.TicketInput) (glpi.CreatedTicket, error) {
+				return glpi.CreatedTicket{}, tc.glpiErr
+			}
+
+			rec := doRequest(h, "POST", "/api/support/requests/"+req.ID+"/retry", setup.user1Token, nil, nil)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d. body: %s", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tc.wantRetryAfter != "" {
+				if got := rec.Header().Get("Retry-After"); got != tc.wantRetryAfter {
+					t.Fatalf("expected Retry-After %q, got %q", tc.wantRetryAfter, got)
+				}
+			} else if got := rec.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("unexpected Retry-After header %q", got)
+			}
+
+			var respEnv SupportTicketResponseEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &respEnv); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if respEnv.SupportRequest.SyncState != tc.wantSyncState {
+				t.Fatalf("expected syncState %q, got %q", tc.wantSyncState, respEnv.SupportRequest.SyncState)
+			}
+			gotLastErrorCode := ""
+			if respEnv.SupportRequest.LastErrorCode != nil {
+				gotLastErrorCode = *respEnv.SupportRequest.LastErrorCode
+			}
+			if gotLastErrorCode != tc.wantLastErrorCode {
+				t.Fatalf("expected lastErrorCode %q, got %q", tc.wantLastErrorCode, gotLastErrorCode)
+			}
+
+			assertNoInternalLeak(t, rec.Body.Bytes())
+		})
+	}
+
+	// Internal error / res == nil path for retry (500 internal_error):
+	// Reaches handleRetrySupportRequest, invokes SupportService.Retry, and when
+	// Retry returns res=nil and err!=nil, hits the exact res==nil guard in supportapi.go.
+	t.Run("retry_res_nil_guard_hits_500", func(t *testing.T) {
+		req := newRetryableRequest(t, "idemp-retry-res-nil-guard", "ext-retry-res-nil-guard", "tok-retry-res-nil-guard")
+
+		spy := &spySupportService{
+			supportServiceAPI: setup.srv.supportSvc,
+			failRetryResNil:   true,
+		}
+		setup.srv.supportSvc = spy
+		t.Cleanup(func() {
+			setup.srv.supportSvc = spy.supportServiceAPI
+		})
+
+		rec := doRequest(h, "POST", "/api/support/requests/"+req.ID+"/retry", setup.user1Token, nil, nil)
+
+		if spy.retryCalls != 1 {
+			t.Fatalf("expected exactly 1 call to Retry, got %d", spy.retryCalls)
+		}
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected status 500, got %d. body: %s", rec.Code, rec.Body.String())
+		}
+		var errEnv SupportErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &errEnv); err != nil {
+			t.Fatalf("failed to unmarshal error response: %v", err)
+		}
+		if errEnv.Error.Code != "internal_error" {
+			t.Fatalf("expected error code internal_error, got %q", errEnv.Error.Code)
+		}
+		if errEnv.Error.Message != "retry failed" {
+			t.Fatalf("expected message 'retry failed', got %q", errEnv.Error.Message)
+		}
+		if strings.Contains(rec.Body.String(), "supportRequest") {
+			t.Fatalf("response body must not contain partial supportRequest DTO: %s", rec.Body.String())
+		}
+		assertNoInternalLeak(t, rec.Body.Bytes())
+	})
 }

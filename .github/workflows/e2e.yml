@@ -1,0 +1,76 @@
+# workflow validada estaticamente; execução remota pendente
+# (Statically validated only; this workflow has not yet executed on GitHub's
+# runners — no push has occurred against it. Treat as unverified until a
+# real CI run succeeds.)
+#
+# Runs the permanent Go + frontend + Playwright E2E suite for wacalls.
+# Everything the suite talks to is 127.0.0.1 (backend + GLPI/Tactical mocks +
+# vite preview), so no external services or secrets are required.
+name: E2E Support Suite
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Go + Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: client
+        run: npx playwright install --with-deps chromium
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: Frontend unit tests
+        working-directory: client
+        run: npm run test
+
+      - name: Frontend build
+        working-directory: client
+        run: npm run build
+
+      - name: Playwright E2E suite
+        working-directory: client
+        timeout-minutes: 15
+        run: npm run test:e2e
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-test-results
+          path: client/test-results/
+          retention-days: 7

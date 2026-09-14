@@ -47,26 +47,58 @@ A tarefa **T-007** é o marco final de encerramento da **Fase 1 (MVP GLPI + Tact
 
 ### 2.2 Suíte de Testes E2E Permanente e Reproduzível
 
-- **Comando Conceitual Separado**:
+- **Comando Dedicado**:
   ```powershell
   npm --prefix client run test:e2e
   ```
 - **Separação de Testes**:
-  - `npm --prefix client run test`: Mantido estritamente para testes unitários rápidos e contratos em memória (execução em milissegundos sem navegador).
-  - `npm --prefix client run test:e2e`: Comando separado dedicado para a validação ponta a ponta com navegador automatizado, mocks HTTP e ciclo de vida completo.
-- **Premissas e Restrições de Implementação**:
-  1. **Ferramenta e Dependências**: Não adicionar bibliotecas pesadas de automação (como Puppeteer ou Playwright) ao repositório sem aprovação formal prévia. A especificação da 7.3 avaliará o uso de ferramentas compatíveis com as dependências reais existentes no projeto ou proporá a adição formal da ferramenta mais leve e aderente.
-  2. **Orquestração de Processos**: Script executor em Node.js ou PowerShell para coordenar a inicialização do backend WACalls (com flags de teste e SQLite temporário) e dos mocks locais de GLPI 11.0.8 e Tactical RMM.
-  3. **Portas Dinâmicas / Conflito Zero**: O mock e o servidor de teste devem utilizar portas dinâmicas (porta 0 / efêmera) ou detecção automática de portas livres em loopback (`127.0.0.1`), prevenindo conflitos com portas padrão do ambiente (como 8085 ou 9999).
-  4. **Readiness Probing**: Implementar verificação ativa de prontidão com polling (checando `GET /healthz` no backend e `GET /health` nos mocks) com timeout global (ex.: 30s) antes de iniciar qualquer comando do navegador.
-  5. **Encerramento Limpo e Sem Resíduos**: Tratamento robusto para encerramento em cenários de sucesso, falha e cancelamento manual (`SIGINT` / Ctrl+C). Limpeza forçada de subprocessos (`process.kill`, `taskkill`) garantindo **zero portas ocupadas e zero processos órfãos**.
-  6. **Compatibilidade Multiplataforma**: Suporte para execução headless transparente em Windows e ambientes Linux de CI.
-  7. **Isolamento 100% Offline**: Nenhuma chamada para a internet; sem uso de credenciais reais.
-  8. **Garantia Estrita de Rede (Anti-Duplo Clique)**: Verificação com interceptação de rede confirmando que múltiplos cliques consecutivos no formulário disparam **exatamente uma única requisição POST** (`postCount === 1`) com a mesma `Idempotency-Key`.
-  9. **Matriz Completa de Estados**: Cobertura de `processing`, `synced`, `retryable_error` (com validação de HTTP 429 e `Retry-After`), `unknown` e `failed`.
-  10. **Segregação de Permissões**: Confirmação visual e funcional de que operadores não acessam reconciliação e administradores (`isAdmin = true`) visualizam e acionam `ReconcileDialog`.
-  11. **Polling e Cancelamento**: Confirmação de que o ciclo de polling cessa imediatamente ao desmontar o componente, fechar o painel ou atingir estado final.
-  12. **Política de Artefatos**: Screenshots e relatórios de execução devem ser gravados em diretório temporário ignorado pelo Git (ex.: `client/test-results/`), sem versionar imagens transitórias.
+  - `npm --prefix client run test`: Mantido estritamente para testes unitários rápidos e contratos em memória (`node --test tests/**/*.test.mjs`, execução em milissegundos sem navegador).
+  - `npm --prefix client run test:e2e`: Comando dedicado para validação ponta a ponta com Playwright (`client/tests/e2e/run.mjs`), orquestrando mocks locais em loopback, backend Go e preview Vite da SPA compilada.
+- **Modo E2E (`-e2e-mode`) e Salvaguardas Obrigatórias**:
+  1. **Flag Explícita `-e2e-mode`**: Desativada por padrão. **NUNCA deve ser usada em produção**. Quando desativada, o comportamento de produção permanece rigorosamente inalterado (nenhuma rota de teste, nenhuma sessão sintética, e flags de seed causam aborto imediato de inicialização).
+  2. **Condições Rígidas para Ativação**:
+     - Servidor escutando estritamente em loopback (`127.0.0.1`, `localhost`, `[::1]`; bind universal `:port`, `0.0.0.0`, `[::]:port` ou `::` é estritamente rejeitado);
+     - Banco SQLite fornecido explicitamente pelo runner e com diretório de execução `-e2e-run-dir` obrigatório;
+     - `runDir` canônico deve estar estritamente contido em `os.TempDir()` e possuir prefixo exclusivo `wacalls-e2e-`;
+     - Arquivo de banco SQLite deve estar diretamente dentro de `runDir` com prefixo exclusivo `wacalls-e2e-` e extensão `.db`;
+     - Rejeição estrita de banco preexistente, traversal (`../`), diretório irmão com prefixo semelhante, symlink/junction fora do `runDir` e banco de produção padrão `wacalls.db`;
+     - `WACALLS_SUPPORT_ENABLED` ativo;
+     - `WACALLS_GLPI_BASE_URL`, `WACALLS_GLPI_WEB_BASE_URL` e `WACALLS_TACTICAL_BASE_URL` apontando estritamente para loopback;
+     - Nenhuma URL externa configurada; qualquer violação aborta o boot imediatamente sem registrar sessão nem tentar tráfego de rede.
+  3. **Sessão WhatsApp Sintética Estritamente em Memória**:
+     - Criada exclusivamente quando `-e2e-mode` e `-e2e-session-id` estão ativos;
+     - Registrada em memória via `SessionManager.register()`;
+     - **Nunca** chama `Device.Save()`, `PutDevice()` ou `startPairing()`;
+     - **Nunca** é persistida no banco SQLite WhatsApp (`sessions` ou tabelas do whatsmeow);
+     - Utiliza apenas JIDs e nomes sintéticos;
+     - Fornece metadados mínimos para a conversa aparecer e abrir no frontend (`messages` e `chat_meta`);
+     - Flags discretas sem separadores perigosos: `-e2e-run-dir`, `-e2e-session-id`, `-e2e-session-name`, `-e2e-own-jid`, `-e2e-chat-jid`, `-e2e-chat-name`, `-e2e-hostname`, `-e2e-glpi-computer-id`, `-e2e-tactical-agent-id`.
+  4. **Restrição de `WACALLS_GLPI_CA_FILE`**:
+     - Permite que o backend confie no certificado autoassinado do mock local de GLPI;
+     - TLS permanece **100% verificado** (`InsecureSkipVerify: false`);
+     - Restrita exclusivamente ao `-e2e-mode` (se informada fora do modo E2E, o startup falha);
+     - Leitura segura em PEM limitada a 1 MiB com mensagens de erro sanitizadas que não expõem caminhos sensíveis ou conteúdo do arquivo.
+  5. **Isolamento de Rede e Seus Limites**:
+     - O `networkGuard` do Playwright intercepta todo o tráfego do navegador, abortando e falhando o teste caso qualquer requisição tente sair de `127.0.0.1`/`localhost`/`::1`;
+     - WebSocket não-loopback é interceptado e bloqueado via `context.routeWebSocket()`;
+     - Service Workers são desativados via `serviceWorkers: "block"`;
+     - A dependência externa de flags (`flagcdn.com`) em `LanguageSwitcher` foi removida, tornando o frontend 100% offline;
+     - O orchestrator Node sanitiza as variáveis de ambiente (sem herança de `WACALLS_*` do shell) e valida URLs de loopback antes do spawn;
+     - Mocks escutam exclusivamente em `127.0.0.1`;
+     - **Limite do Isolamento**: Este isolamento atua no nível de aplicação, interceptação de navegador e configuração de processos. Não constitui uma jaula/sandbox em nível de kernel (como namespaces Linux ou container Docker isolado sem rede).
+  6. **Contrato de Retry-After e Mapeamento de Status HTTP**:
+     - A API pública mantém o contrato fixo de 60 segundos aprovado na T-006 exclusivamente para erros `rate_limited` (`Retry-After: 60`), derivado de `updatedAt` persistido no banco para sobreviver a recargas de página;
+     - O valor dinâmico de `RetryAfter` retornado internamente pelo cliente GLPI (`internal/glpi`) fica registrado como débito técnico de hardening futuro;
+     - Erros com `integration_auth_failed` retornam HTTP 502 Bad Gateway com o envelope `SupportTicketResponseEnvelope` preservado para que o frontend renderize o estado recuperável adequadamente;
+     - Timestamps Unix em segundos do backend são convertidos com segurança para milissegundos via helper `supportDate.ts`, tratando zero, nulo, negativo e inválido sem exibir 1970.
+- **Cobertura da Matriz de Estados e Cenários**:
+  1. **Anti-Duplo Clique & Idempotência**: Validação por interceptação de rede confirmando que cliques múltiplos e rápidos no formulário disparam exatamente uma única requisição POST (`postCount === 1`) com header `Idempotency-Key` válido (`ui-...`).
+  2. **Caminho Feliz (`synced`)**: Transição para "Sincronizado", renderização de `#1000`, link web sanitizado para o GLPI com `target="_blank"` e `rel="noopener noreferrer"`, e timestamp no período atual.
+  3. **Falha Recuperável (`retryable_error`)**: Simulação de HTTP 429 com `Retry-After: 2`, bloqueio temporário do botão, reenvio após countdown e sucesso na sincronização.
+  4. **Falha Ambígua e Segregação de Permissões (`unknown`)**: Simulação de 503 no GLPI, verificação de que o operador comum não visualiza ação de conciliação administrativa e confirmação de que o administrador executa a conciliação manual via `ReconcileDialog`.
+  5. **Falha Permanente (`failed`)**: Simulação de 400 Bad Request, exibição do status "Falha Permanente" e botão "Criar Novo Chamado" reabrindo o formulário limpo.
+  6. **Cancelamento de Polling**: Verificação de que requisições periódicas cessam quando o painel de suporte é fechado e quando ocorre troca de conversa ativa.
+  7. **Política de Artefatos**: Relatórios e traces gravados em `client/test-results/` (ignorado pelo Git). Limpeza garantida de processos órfãos (`SIGTERM`/`SIGKILL`) e diretórios de estado temporário.
 
 ---
 
@@ -187,10 +219,10 @@ A tarefa **T-007** é o marco final de encerramento da **Fase 1 (MVP GLPI + Tact
 A Fase 1 (MVP GLPI + Tactical) será considerada formalmente concluída somente quando todos os critérios a seguir forem plenamente atendidos:
 
 1. [x] **Teste de Licença / Timezone Estável**: Diagnóstico realizado e teste `TestLicenseStatusFaixasDeVencimento` corrigido deterministicamente sem skips ou sleeps (suíte Go global 100% verde).
-2. [ ] **Build Go Global Aprovado**: `go build ./...` executado com sucesso e zero erros.
-3. [ ] **Suíte Go Global 100% Verde**: `go test ./...` executado com aprovação integral em todos os pacotes.
-4. [ ] **Frontend Build e Testes Aprovados**: `npm run build` e `npm run test` no client executados com zero falhas.
-5. [ ] **Suíte E2E Permanente e Reproduzível**: Execução de `npm --prefix client run test:e2e` aprovada com validação de rede (anti-duplo clique com 1 único POST), matriz de estados e sem processos órfãos.
+2. [x] **Build Go Global Aprovado**: `go build ./...` executado com sucesso e zero erros.
+3. [x] **Suíte Go Global 100% Verde**: `go test -count=1 ./...` executado com aprovação integral em todos os pacotes.
+4. [x] **Frontend Build e Testes Aprovados**: `npm run build` e `npm run test` no client executados com zero falhas (16/16).
+5. [x] **Suíte E2E Permanente e Reproduzível**: `npm --prefix client run test:e2e` aprovada 2x consecutivas (12/12), com validação de rede real (anti-duplo clique com 1 único POST), matriz de 11/11 estados com assertion no navegador, e zero processos/diretórios órfãos comprovado inclusive sob falha controlada injetada em 3 estágios do boot.
 6. [ ] **Conformidade Multi-Database**: Stores validados tanto em SQLite quanto no harness MariaDB 11.4 descartável (caso haja qualquer alteração de persistência).
 7. [ ] **Segurança do Link GLPI Resolvida**: Decisão arquitetural de navegação implementada e validada com esquemas seguros e proteção contra XSS/open redirect (ou Opção C confirmada como fallback seguro).
 8. [ ] **Homologação Real Concluída**: Teste assistido no ambiente de homologação pessoal de Ricardo executado com evidências documentadas e encerramento oficial/manual comprovado.
@@ -207,7 +239,7 @@ A execução da T-007 será realizada rigorosamente segundo o fatiamento abaixo,
 |---|---|---|---|---|---|
 | **7.1** | **Diagnóstico e Correção do Teste de Licença**: Concluída. Clock controlável injetado via `licenseNow`, testes de borda/virada/fuso adicionados; suíte Go 100% verde | `cmd/server/license.go`, `cmd/server/license_test.go` | `go test -run '^TestLicense' -count=50` e `go test ./...` | Suíte Go global 100% verde | **Concluída (autorizada)** |
 | **7.2** | **Hardening do Link GLPI**: Deliberação da decisão pendente (Opção A, B ou Opção C fallback seguro), validação de esquema (`https:`), sanitização, `rel="noopener noreferrer"` e tratamento seguro para links inválidos | `client/src/components/domain/support/SupportRequestStatus.tsx`, `client/src/types/support.ts`, `client/tests/support.test.mjs`, `cmd/server/supportservice.go`, `cmd/server/supportapi.go` | `npm --prefix client run test` e `npm --prefix client run build` | Hardening do link GLPI concluído e testado | **Exige autorização prévia antes de editar arquivos** |
-| **7.3** | **Suíte E2E Permanente**: Especificação de runner leve sem adições pesadas não autorizadas, orquestrador de backend/mock em portas dinâmicas, timeout de 30s, contagem exata de POSTs e encerramento limpo | `client/tests/e2e/support.e2e.test.mjs` (ou caminho equivalente), `client/package.json` | `npm --prefix client run test:e2e` | Suíte E2E permanente versionada e aprovada | **Exige autorização prévia antes de criar dependências ou scripts** |
+| **7.3** | **Suíte E2E Permanente**: implementada, auditada (achados críticos/importantes corrigidos: `cmd/e2eseed` removido, `validateE2EPreconditions` unificado via `precheckE2EBoot`, `bootEnvironment` com try/catch/finally real e taskkill/process-group corretos, matriz 11/11, CI criada, testes unitários dos fixes de produção, CA file limitada a 1 MiB, WebSocket/ServiceWorker fechados no networkGuard) | `client/tests/e2e/**`, `cmd/server/e2e_mode.go`, `cmd/server/main.go`, `cmd/server/server.go`, `cmd/server/support_config.go`, `.github/workflows/e2e.yml` | `npm --prefix client run test:e2e` (2x consecutivas, 12/12) + bateria Go/npm completa | Suíte E2E permanente versionada, corrigida e aprovada; aguardando nova auditoria antes do push | **Corrigida sob autorização explícita do usuário; push ainda não autorizado** |
 | **7.4** | **Homologação Real Controlada**: Execução assistida no ambiente de teste pessoal de Ricardo com dados sintéticos, chamado identificado `[HOMOLOG-WACALLS-T007]` e encerramento via operação oficial ou registro manual | Procedimento operacional (sem alteração de código) | Chamadas controladas via backend WACalls no ambiente de teste pessoal | Homologação pessoal concluída com evidências | **Autorização obrigatória imediatamente antes de qualquer chamada real** |
 | **7.5** | **Hardening de Segurança e LGPD**: Auditoria read-only de IDOR, limites de body, CORS, trilha de auditoria e estudo comparativo de rate limiting (sem aprovação prévia) | `cmd/server/supportapi.go`, `cmd/server/server.go`, `docs/SECURITY.md` | `go test -run Support ./cmd/server` | Auditoria de segurança e LGPD concluídas | **Auditoria read-only pode ser automática; correções exigem autorização** |
 | **7.6** | **Deploy, Ativação Progressiva e Rollback**: Validação de flags seguras (`WACALLS_SUPPORT_ENABLED=false`, `features.support=false`), backup prévio, migração aditiva e kill switch | `docs/runbooks/DEPLOY-FASE-1.md` (se aplicável) | Smoke tests de subida do servidor e reversão emergencial | Roteiro de deploy e rollback testados | **Autorização obrigatória imediatamente antes de qualquer ação** |

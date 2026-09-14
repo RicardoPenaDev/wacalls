@@ -39,6 +39,9 @@ async function handleResponse<T>(res: Response): Promise<T> {
 
     try {
       const body = await res.json();
+      if (body && typeof body === "object" && "supportRequest" in body && (body as any).supportRequest) {
+        return body as T;
+      }
       if (body?.error) {
         if (typeof body.error === "object") {
           if (body.error.code) code = body.error.code;

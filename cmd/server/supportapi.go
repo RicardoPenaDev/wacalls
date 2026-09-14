@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,8 +23,23 @@ func (s *server) registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/support/requests/{id}/device", s.requireAuth(s.handleUpdateSupportRequestDevice))
 }
 
+type supportServiceAPI interface {
+	ListByConversation(ctx context.Context, tenantID, sessionID, chatJID string, limit int) ([]*SupportRequest, error)
+	CreateTicket(ctx context.Context, in ServiceCreateTicketInput) (*ServiceCreateTicketResult, error)
+	GetByID(ctx context.Context, tenantID, id string) (*SupportRequest, error)
+	Retry(ctx context.Context, in ServiceRetryInput) (*SupportRequest, error)
+	Reconcile(ctx context.Context, in ServiceReconcileInput) (*SupportRequest, error)
+	UpdateDevice(ctx context.Context, in ServiceUpdateDeviceInput) (*SupportRequest, bool, error)
+}
+
 func (s *server) isSupportEnabled() bool {
-	return s != nil && s.supportSvc != nil
+	if s == nil || s.supportSvc == nil {
+		return false
+	}
+	if svc, ok := s.supportSvc.(*SupportService); ok && svc == nil {
+		return false
+	}
+	return true
 }
 
 func (s *server) isTacticalEnabled() bool {
@@ -280,8 +296,10 @@ func (s *server) handleCreateChatSupportTicket(w http.ResponseWriter, r *http.Re
 			writeSupportError(w, http.StatusConflict, "idempotency_conflict", "idempotency key already used with different payload", 0)
 			return
 		}
-		writeSupportError(w, http.StatusInternalServerError, "internal_error", "failed to create support ticket", 0)
-		return
+		if res == nil {
+			writeSupportError(w, http.StatusInternalServerError, "internal_error", "failed to create support ticket", 0)
+			return
+		}
 	}
 
 	dto := s.toPublicSupportRequestDTO(res.Request)
@@ -302,6 +320,10 @@ func (s *server) handleCreateChatSupportTicket(w http.ResponseWriter, r *http.Re
 		if res.Request.LastErrorCode == "rate_limited" {
 			w.Header().Set("Retry-After", "60")
 			writeJSON(w, http.StatusTooManyRequests, respEnv)
+			return
+		}
+		if res.Request.LastErrorCode == "integration_auth_failed" {
+			writeJSON(w, http.StatusBadGateway, respEnv)
 			return
 		}
 		writeJSON(w, http.StatusAccepted, respEnv)
@@ -424,8 +446,10 @@ func (s *server) handleRetrySupportRequest(w http.ResponseWriter, r *http.Reques
 			writeSupportError(w, http.StatusConflict, "state_conflict", "concurrent retry in progress or state changed", 0)
 			return
 		}
-		writeSupportError(w, http.StatusInternalServerError, "internal_error", "retry failed", 0)
-		return
+		if res == nil {
+			writeSupportError(w, http.StatusInternalServerError, "internal_error", "retry failed", 0)
+			return
+		}
 	}
 
 	dto := s.toPublicSupportRequestDTO(res)
@@ -441,6 +465,10 @@ func (s *server) handleRetrySupportRequest(w http.ResponseWriter, r *http.Reques
 		if res.LastErrorCode == "rate_limited" {
 			w.Header().Set("Retry-After", "60")
 			writeJSON(w, http.StatusTooManyRequests, respEnv)
+			return
+		}
+		if res.LastErrorCode == "integration_auth_failed" {
+			writeJSON(w, http.StatusBadGateway, respEnv)
 			return
 		}
 		writeJSON(w, http.StatusAccepted, respEnv)

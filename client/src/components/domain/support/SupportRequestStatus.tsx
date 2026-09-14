@@ -22,6 +22,7 @@ import { RetryAction } from "./RetryAction";
 import { ReconcileDialog } from "./ReconcileDialog";
 import { isAdmin } from "@/stores/auth";
 import { sanitizeGLPIWebUrl } from "@/lib/supportUrl";
+import { formatUnixSeconds } from "@/lib/supportDate";
 import type { AuthUser } from "@/types/auth";
 import type { DeviceBindingDTO, SupportRequestDTO, SupportSyncState, SupportTicketResponseEnvelope } from "@/types/support";
 
@@ -117,7 +118,7 @@ export const SupportRequestStatus = ({
 
   const safeWebUrl = sanitizeGLPIWebUrl(request.webUrl);
   const userIsAdmin = isAdmin(currentUser);
-  const formattedDate = request.createdAt ? new Date(request.createdAt).toLocaleString() : "—";
+  const formattedDate = formatUnixSeconds(request.createdAt);
 
   return (
     <div className="space-y-4">
@@ -203,7 +204,13 @@ export const SupportRequestStatus = ({
           <span className="text-xs font-semibold text-foreground block">
             Ação Recomendada
           </span>
-          <RetryAction requestId={request.id} onSuccess={onUpdate} />
+          <RetryAction
+            requestId={request.id}
+            onSuccess={onUpdate}
+            // request.updatedAt is Unix SECONDS (cmd/server: time.Now().UTC().Unix()),
+            // not milliseconds — convert before arithmetic against Date.now().
+            retryAfterUntil={request.lastErrorCode === "rate_limited" ? request.updatedAt * 1000 + 60_000 : undefined}
+          />
         </div>
       )}
 

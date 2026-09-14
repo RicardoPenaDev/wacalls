@@ -431,3 +431,175 @@ test("Ações do ticket confirmado: renderiza Abrir no GLPI com target/rel segur
   // Apenas a ação de navegação pura no navegador é utilizada
   assert.equal(apiRequests, 0, "O frontend nunca deve disparar requisições diretas à API GLPI");
 });
+
+// ---------------------------------------------------------------------------
+// 10. handleResponse (interno): exercitado via funções exportadas reais de
+//     support.ts com fetch stubado — não uma reimplementação em mock.
+// ---------------------------------------------------------------------------
+// handleResponse() não é exportada por support.ts, mas toda função exportada
+// (createChatSupportTicket, getSupportRequest, etc.) delega a ela. Registramos
+// um resolve/load hook mínimo (support-alias-loader.mjs) apenas para que o
+// alias "@/*" do tsconfig e o global "import.meta.env" injetado pelo Vite em
+// build funcionem sob o executor de testes puro do Node, e então importamos o
+// módulo real dinamicamente — nenhuma lógica de support.ts é reimplementada.
+const { register } = await import("node:module");
+
+globalThis.__TEST_IMPORT_META_ENV__ = {};
+register(new URL("./support-alias-loader.mjs", import.meta.url).href, import.meta.url);
+
+const { createChatSupportTicket, getSupportRequest, SupportApiError } = await import(
+  "../src/services/support.ts"
+);
+
+test("handleResponse via createChatSupportTicket: sucesso 201 retorna o corpo exatamente como recebido", async () => {
+  const originalFetch = globalThis.fetch;
+  const successBody = {
+    supportRequest: { id: "x", syncState: "synced" },
+    warnings: [],
+  };
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 201,
+    statusText: "Created",
+    headers: new Map(),
+    json: async () => successBody,
+  });
+  try {
+    const result = await createChatSupportTicket(
+      "sess-1",
+      "5511999999999@s.whatsapp.net",
+      "idem-key-1",
+      { requesterName: "Maria Silva", title: "t", description: "d", priority: 3 },
+    );
+    assert.deepEqual(result, successBody, "Caminho de sucesso real (res.ok) deve permanecer inalterado");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handleResponse via getSupportRequest: HTTP 429 com supportRequest no corpo resolve em vez de lançar", async () => {
+  const originalFetch = globalThis.fetch;
+  const body = {
+    supportRequest: { id: "x", syncState: "retryable_error", lastErrorCode: "rate_limited" },
+    warnings: [],
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 429,
+    statusText: "Too Many Requests",
+    headers: new Map([["Retry-After", "60"]]),
+    json: async () => body,
+  });
+  try {
+    const result = await getSupportRequest("req-1");
+    assert.deepEqual(result, body, "429 com supportRequest presente e truthy deve RESOLVER com o corpo, não lançar");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handleResponse via getSupportRequest: HTTP 502 com supportRequest no corpo resolve em vez de lançar", async () => {
+  const originalFetch = globalThis.fetch;
+  const body = {
+    supportRequest: { id: "x", syncState: "failed", lastErrorCode: "ticket_rejected" },
+    warnings: [],
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 502,
+    statusText: "Bad Gateway",
+    headers: new Map(),
+    json: async () => body,
+  });
+  try {
+    const result = await getSupportRequest("req-1");
+    assert.deepEqual(result, body, "502 com supportRequest presente e truthy deve RESOLVER com o corpo, não lançar");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handleResponse via getSupportRequest: HTTP 500 sem supportRequest lança SupportApiError e NUNCA vira sucesso silencioso", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    headers: new Map(),
+    json: async () => ({
+      error: { code: "internal_error", message: "failed to create support ticket" },
+    }),
+  });
+  try {
+    await assert.rejects(
+      () => getSupportRequest("req-1"),
+      (err) => {
+        // Prova explícita: um erro interno puro (sem chave supportRequest) é
+        // rejeitado com SupportApiError — jamais transformado em um valor
+        // resolvido/sucesso silencioso.
+        assert.ok(err instanceof SupportApiError, "erro interno deve ser exatamente SupportApiError, não um valor resolvido");
+        assert.equal(err.status, 500);
+        assert.equal(err.code, "internal_error");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handleResponse via getSupportRequest: HTTP 400 com corpo JSON inválido usa statusText como mensagem de fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 400,
+    statusText: "Bad Request",
+    headers: new Map(),
+    json: async () => {
+      throw new SyntaxError("Unexpected end of JSON input");
+    },
+  });
+  try {
+    await assert.rejects(
+      () => getSupportRequest("req-1"),
+      (err) => {
+        assert.ok(err instanceof SupportApiError);
+        assert.equal(err.status, 400);
+        assert.equal(err.message, "Bad Request", "Quando o JSON falha, a mensagem cai para res.statusText");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handleResponse via getSupportRequest: HTTP 404 com corpo vazio e sem statusText não quebra o duplo fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 404,
+    statusText: "",
+    headers: new Map(),
+    json: async () => {
+      throw new SyntaxError("Unexpected end of JSON input");
+    },
+  });
+  try {
+    await assert.rejects(
+      () => getSupportRequest("req-1"),
+      (err) => {
+        assert.ok(err instanceof SupportApiError);
+        assert.equal(err.status, 404);
+        assert.equal(
+          err.message,
+          "HTTP 404",
+          "Sem statusText, o fallback duplo (JSON falho -> statusText vazio) não deve quebrar; usa 'HTTP <status>'",
+        );
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

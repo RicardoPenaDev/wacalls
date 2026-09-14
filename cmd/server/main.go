@@ -28,7 +28,42 @@ func main() {
 	resetAdminPass := flag.String("reset-admin-password", "", "senha usada junto com -reset-admin-email")
 	licenseFile := flag.String("license", "", "arquivo licenca.json (padrao: ao lado do binario)")
 	licenseInfo := flag.Bool("license-info", false, "mostra o estado da licenca e o codigo desta maquina, e sai")
+	e2eMode := flag.Bool("e2e-mode", false, "ativa modo de teste E2E com isolamento estrito de loopback")
+	e2eRunDir := flag.String("e2e-run-dir", "", "diretório temporário de execução exclusivo do runner E2E (requer -e2e-mode)")
+	e2eSessionID := flag.String("e2e-session-id", "", "ID da sessão WhatsApp sintética para teste E2E (requer -e2e-mode)")
+	e2eSessionName := flag.String("e2e-session-name", "E2E WhatsApp", "nome de exibição da sessão sintética")
+	e2eOwnJID := flag.String("e2e-own-jid", "", "JID próprio sintético para teste E2E (requer -e2e-mode)")
+	e2eChatJID := flag.String("e2e-chat-jid", "", "JID do chat sintético para teste E2E (requer -e2e-mode)")
+	e2eChatName := flag.String("e2e-chat-name", "E2E Customer", "nome do chat sintético")
+	e2eHostname := flag.String("e2e-hostname", "", "hostname do equipamento sintético (requer -e2e-mode)")
+	e2eGLPIComputerID := flag.String("e2e-glpi-computer-id", "", "ID do computador no GLPI mock")
+	e2eTacticalAgentID := flag.String("e2e-tactical-agent-id", "", "ID do agente no Tactical mock")
 	flag.Parse()
+
+	e2eCfg := e2eConfig{
+		Enabled:         *e2eMode,
+		RunDir:          strings.TrimSpace(*e2eRunDir),
+		SessionID:       strings.TrimSpace(*e2eSessionID),
+		SessionName:     strings.TrimSpace(*e2eSessionName),
+		OwnJID:          strings.TrimSpace(*e2eOwnJID),
+		ChatJID:         strings.TrimSpace(*e2eChatJID),
+		ChatName:        strings.TrimSpace(*e2eChatName),
+		Hostname:        strings.TrimSpace(*e2eHostname),
+		GLPIComputerID:  strings.TrimSpace(*e2eGLPIComputerID),
+		TacticalAgentID: strings.TrimSpace(*e2eTacticalAgentID),
+	}
+
+	// precheckE2EBoot is the single, real safeguard call: it loads the
+	// support configuration from environment and, when -e2e-mode is set,
+	// validates every E2E precondition (loopback addr/DB/GLPI/Tactical/Web,
+	// support enabled) before any database or network I/O happens. This is
+	// the exact function e2e_mode_test.go exercises directly — there is no
+	// duplicate/parallel validation anywhere else in the codebase.
+	supCfg, err := precheckE2EBoot(e2eCfg, *addr, *dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "startup failed: "+err.Error())
+		os.Exit(1)
+	}
 
 	if *licenseInfo {
 		printLicenseInfo(*licenseFile)
@@ -61,7 +96,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, log)
+	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, supCfg, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
@@ -92,6 +127,13 @@ func main() {
 	if err := srv.sessions.Restore(ctx); err != nil {
 		log.Error("session restore failed", "err", err)
 		os.Exit(1)
+	}
+
+	if *e2eMode {
+		if err := srv.setupE2ESyntheticSession(ctx, e2eCfg, *seedAdminEmail); err != nil {
+			log.Error("e2e synthetic session setup failed", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.routes()}

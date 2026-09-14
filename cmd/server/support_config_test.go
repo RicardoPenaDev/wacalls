@@ -1,13 +1,57 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// writeTestSelfSignedCert generates a throwaway self-signed certificate (not a
+// real secret) and writes it as PEM to dir/cert.pem, returning its path.
+func writeTestSelfSignedCert(t *testing.T, dir string) string {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-only"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	path := filepath.Join(dir, "cert.pem")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create cert file: %v", err)
+	}
+	defer f.Close()
+	if err := pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatalf("encode cert: %v", err)
+	}
+	return path
+}
 
 func TestBuildGLPITicketWebURL_ConstrucaoCorretaEFormatos(t *testing.T) {
 	cases := []struct {
@@ -448,5 +492,163 @@ func TestSupportAPI_WebURLNoEnvelopeEOmiteHref(t *testing.T) {
 	}
 	if strings.Contains(body, apiHref) {
 		t.Fatalf("expected body NOT to contain internal api href, got %s", body)
+	}
+}
+
+func setBaseSupportEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("WACALLS_SUPPORT_ENABLED", "1")
+	t.Setenv("WACALLS_GLPI_BASE_URL", "https://glpi.example.com")
+	t.Setenv("WACALLS_GLPI_CLIENT_ID", "client-1")
+	t.Setenv("WACALLS_GLPI_CLIENT_SECRET", "secret-1")
+	t.Setenv("WACALLS_GLPI_USERNAME", "user-1")
+	t.Setenv("WACALLS_GLPI_PASSWORD", "pass-1")
+	t.Setenv("WACALLS_GLPI_WEB_BASE_URL", "")
+	t.Setenv("WACALLS_GLPI_CA_FILE", "")
+}
+
+func TestLoadSupportConfig_GLPICAFile_UnsetByDefault_LeavesHTTPClientNil(t *testing.T) {
+	setBaseSupportEnv(t)
+
+	cfg, err := loadSupportConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GLPIConfig.HTTPClient != nil {
+		t.Fatalf("expected nil HTTPClient when WACALLS_GLPI_CA_FILE is unset, got %+v", cfg.GLPIConfig.HTTPClient)
+	}
+}
+
+func TestLoadSupportConfig_GLPICAFile_RejectedOutsideE2EMode(t *testing.T) {
+	setBaseSupportEnv(t)
+	certPath := writeTestSelfSignedCert(t, t.TempDir())
+	t.Setenv("WACALLS_GLPI_CA_FILE", certPath)
+
+	_, err := loadSupportConfig()
+	if err == nil {
+		t.Fatal("expected error when WACALLS_GLPI_CA_FILE is set outside -e2e-mode")
+	}
+	if !strings.Contains(err.Error(), "only permitted in -e2e-mode") {
+		t.Fatalf("expected error to mention 'only permitted in -e2e-mode', got %q", err.Error())
+	}
+}
+
+func TestLoadSupportConfig_GLPICAFile_ValidPEM_InE2EMode_SetsHTTPClientWithRootCAs(t *testing.T) {
+	setBaseSupportEnv(t)
+	certPath := writeTestSelfSignedCert(t, t.TempDir())
+	t.Setenv("WACALLS_GLPI_CA_FILE", certPath)
+
+	cfg, err := loadSupportConfigWithE2E(true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GLPIConfig.HTTPClient == nil {
+		t.Fatal("expected non-nil HTTPClient when WACALLS_GLPI_CA_FILE is set in e2e mode")
+	}
+	transport, ok := cfg.GLPIConfig.HTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", cfg.GLPIConfig.HTTPClient.Transport)
+	}
+	if transport.TLSClientConfig == nil || transport.TLSClientConfig.RootCAs == nil {
+		t.Fatal("expected TLSClientConfig.RootCAs to be populated")
+	}
+	if transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("InsecureSkipVerify must never be set by WACALLS_GLPI_CA_FILE wiring")
+	}
+}
+
+func TestLoadSupportConfig_GLPICAFile_MissingFile_InE2EMode_ReturnsSafeError(t *testing.T) {
+	setBaseSupportEnv(t)
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "does-not-exist.pem")
+	t.Setenv("WACALLS_GLPI_CA_FILE", fullPath)
+
+	_, err := loadSupportConfigWithE2E(true)
+	if err == nil {
+		t.Fatal("expected error for missing WACALLS_GLPI_CA_FILE, got nil")
+	}
+	if !strings.Contains(err.Error(), "WACALLS_GLPI_CA_FILE") {
+		t.Fatalf("expected error to mention WACALLS_GLPI_CA_FILE, got %q", err.Error())
+	}
+	// Verify full directory path is not leaked in error message
+	if strings.Contains(err.Error(), tempDir) {
+		t.Fatalf("error message must not leak full directory path: %q", err.Error())
+	}
+}
+
+func TestLoadSupportConfig_GLPICAFile_InvalidPEM_InE2EMode_ReturnsSafeError(t *testing.T) {
+	setBaseSupportEnv(t)
+	tempDir := t.TempDir()
+	badPath := filepath.Join(tempDir, "bad.pem")
+	if err := os.WriteFile(badPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatalf("write bad cert: %v", err)
+	}
+	t.Setenv("WACALLS_GLPI_CA_FILE", badPath)
+
+	_, err := loadSupportConfigWithE2E(true)
+	if err == nil {
+		t.Fatal("expected error for invalid PEM content, got nil")
+	}
+	if !strings.Contains(err.Error(), "WACALLS_GLPI_CA_FILE") {
+		t.Fatalf("expected error to mention WACALLS_GLPI_CA_FILE, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), tempDir) {
+		t.Fatalf("error message must not leak full directory path: %q", err.Error())
+	}
+}
+
+// padCertToExactSize appends trailing '#' bytes (never forming a new
+// "-----BEGIN" PEM marker, so pool.AppendCertsFromPEM keeps accepting the
+// leading valid certificate block and simply stops at the garbage) until the
+// file is exactly size bytes, then rewrites it.
+func padCertToExactSize(t *testing.T, path string, size int64) {
+	t.Helper()
+	base, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated cert: %v", err)
+	}
+	if int64(len(base)) > size {
+		t.Fatalf("generated cert already exceeds target size %d (got %d); adjust test", size, len(base))
+	}
+	padded := append(append([]byte{}, base...), bytes.Repeat([]byte{'#'}, int(size)-len(base))...)
+	if int64(len(padded)) != size {
+		t.Fatalf("padding produced %d bytes, want exactly %d", len(padded), size)
+	}
+	if err := os.WriteFile(path, padded, 0o600); err != nil {
+		t.Fatalf("write padded cert: %v", err)
+	}
+}
+
+func TestLoadSupportConfig_GLPICAFile_ExactlyAtLimit_Accepted(t *testing.T) {
+	setBaseSupportEnv(t)
+	certPath := writeTestSelfSignedCert(t, t.TempDir())
+	padCertToExactSize(t, certPath, maxCAFileBytes)
+	t.Setenv("WACALLS_GLPI_CA_FILE", certPath)
+
+	cfg, err := loadSupportConfigWithE2E(true)
+	if err != nil {
+		t.Fatalf("expected a valid PEM file exactly at the %d byte limit to be accepted, got error: %v", maxCAFileBytes, err)
+	}
+	if cfg.GLPIConfig.HTTPClient == nil {
+		t.Fatal("expected HTTPClient to be configured for a valid CA file exactly at the limit")
+	}
+}
+
+func TestLoadSupportConfig_GLPICAFile_OneByteOverLimit_Rejected(t *testing.T) {
+	setBaseSupportEnv(t)
+	dir := t.TempDir()
+	certPath := writeTestSelfSignedCert(t, dir)
+	padCertToExactSize(t, certPath, maxCAFileBytes+1)
+	t.Setenv("WACALLS_GLPI_CA_FILE", certPath)
+
+	_, err := loadSupportConfigWithE2E(true)
+	if err == nil {
+		t.Fatalf("expected a file one byte over the %d byte limit to be rejected, got nil error", maxCAFileBytes)
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected a size-limit error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Fatalf("error must not leak the full directory path: %q", err.Error())
 	}
 }

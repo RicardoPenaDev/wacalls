@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +17,33 @@ import (
 	"wacalls/internal/glpi"
 	"wacalls/internal/tactical"
 )
+
+// maxCAFileBytes bounds how much of WACALLS_GLPI_CA_FILE is ever read into
+// memory. 1 MiB comfortably fits any real CA certificate chain (a single PEM
+// certificate is a few KiB) while rejecting an arbitrarily large file before
+// it is fully buffered.
+const maxCAFileBytes int64 = 1 << 20 // 1 MiB
+
+// readLimitedCAFile reads at most maxCAFileBytes+1 bytes from path so a file
+// exactly at the limit is accepted and one byte over is rejected, without
+// ever buffering more than the limit (+1 sentinel byte) in memory. The file
+// handle is always closed via defer, on every return path. Errors never
+// include the file's full path or its content — only filepath.Base(path).
+func readLimitedCAFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("WACALLS_GLPI_CA_FILE: failed to read certificate file (%s)", filepath.Base(path))
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxCAFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("WACALLS_GLPI_CA_FILE: failed to read certificate file (%s)", filepath.Base(path))
+	}
+	if int64(len(data)) > maxCAFileBytes {
+		return nil, fmt.Errorf("WACALLS_GLPI_CA_FILE: certificate file exceeds the %d byte limit (%s)", maxCAFileBytes, filepath.Base(path))
+	}
+	return data, nil
+}
 
 type supportConfig struct {
 	Enabled               bool
@@ -43,6 +75,10 @@ func parseEnvInt(key string, defaultVal int) (int, error) {
 }
 
 func loadSupportConfig() (supportConfig, error) {
+	return loadSupportConfigWithE2E(false)
+}
+
+func loadSupportConfigWithE2E(e2eMode bool) (supportConfig, error) {
 	var cfg supportConfig
 	cfg.Enabled = parseEnvBool("WACALLS_SUPPORT_ENABLED")
 	if !cfg.Enabled {
@@ -108,6 +144,29 @@ func loadSupportConfig() (supportConfig, error) {
 		EntityRecursive: entityRecursive,
 		AcceptLanguage:  strings.TrimSpace(os.Getenv("WACALLS_GLPI_ACCEPT_LANGUAGE")),
 		Timeout:         time.Duration(glpiTimeoutSec) * time.Second,
+	}
+
+	// WACALLS_GLPI_CA_FILE is optional and exists solely for the Playwright E2E
+	// harness (client/tests/e2e), which runs a local GLPI mock behind a
+	// freshly generated self-signed certificate. It is strictly restricted to
+	// -e2e-mode. When set in -e2e-mode, requests to GLPI trust exactly that
+	// certificate in addition to nothing else — TLS verification stays fully
+	// enabled (no InsecureSkipVerify, no global trust change).
+	if caFile := strings.TrimSpace(os.Getenv("WACALLS_GLPI_CA_FILE")); caFile != "" {
+		if !e2eMode {
+			return cfg, errors.New("WACALLS_GLPI_CA_FILE: custom CA file is only permitted in -e2e-mode")
+		}
+		pemBytes, err := readLimitedCAFile(caFile)
+		if err != nil {
+			return cfg, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return cfg, fmt.Errorf("WACALLS_GLPI_CA_FILE: no valid PEM certificate found in (%s)", filepath.Base(caFile))
+		}
+		cfg.GLPIConfig.HTTPClient = &http.Client{
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
+		}
 	}
 
 	// GLPI Web Base URL is optional. If unset, web links to GLPI tickets are disabled.

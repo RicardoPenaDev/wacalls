@@ -437,6 +437,78 @@ teste do arquivo que usa um `tactical.Client` real, não mock, provando
 `missing_tactical → matched` com `glpi_computer_id=59` preservado através
 do caminho de decode real).
 
+## D-025 — Toda resolução automática exata de equipamento deve persistir o vínculo
+
+Data: 2026-09-15 · Status: aceita
+
+Decisão: Quando hostname ou patrimônio resultar em correspondência exata e única de
+`device_binding`, o registro em `support_requests` deve persistir obrigatoriamente
+`device_binding_id`. O campo `glpi_computer_id` permanece conforme o modelo atual.
+O `tactical_agent_id` permanece pertencendo exclusivamente ao registro de `device_bindings`,
+sem necessidade de duplicação em `support_requests`. Correspondências ausentes ou
+ambíguas nunca devem produzir associação silenciosa.
+Motivo: Garantir integridade relacional entre o chamado e o equipamento vinculado,
+permitindo que a interface carregue dados cadastrais e telemetria operacional a partir
+da chave estrangeira `device_binding_id` sem depender de reconciliação manual posterior.
+Alternativas consideradas: Duplicar campos operacionais do Tactical em `support_requests`
+— rejeitada (desnormalização desnecessária); enriquecer apenas em memória na leitura —
+rejeitada (inconsistência e perda de rastreabilidade).
+Consequências: Criações automáticas de chamados passam a gravar `device_binding_id`
+quando houver correspondência exata e unívoca. Chamados sem correspondência ou com
+ambiguidade permanecem desvinculados com log sanitizado. A regra vale para novas criações
+(sem alteração retroativa em chamados já gravados).
+
+## D-026 — Requisitos de produto do portal do agente Windows (T-008, Fase 4B)
+
+Data: 2026-09-15 · Status: aceita
+
+Decisão: Definição abrangente dos requisitos de produto e arquitetura para o portal do agente Windows:
+1. **Comportamento da janela e abertura:** O card inicia compacto no canto da tela (System Tray)
+   e aumenta dinamicamente para se transformar na janela de chat interativo.
+2. **Listagem e histórico de chamados:** Apresenta a listagem dos chamados ativos daquela máquina
+   com número de protocolo, título resumido e status atual. Chamados encerrados não aparecem nessa
+   listagem. Ao entrar em um chamado ativo, a interface não exibe automaticamente as mensagens
+   anteriores (preservando a privacidade em estações compartilhadas), mas permite o envio imediato
+   de novas mensagens e a visualização das respostas recebidas a partir daquela retomada.
+3. **Fluxo do solicitante:** O funcionário informa seu nome e telefone (opcional), escolhe entre
+   o computador atual ou outro equipamento e fornece exclusivamente uma descrição livre do problema.
+   O título curto do chamado é gerado automaticamente pelo sistema a partir da descrição. O solicitante
+   não seleciona categoria (`support_requests.category_id` permanece opcional no schema, vazio nesse fluxo).
+4. **Identificação de equipamento:** Os dados do computador atual são exibidos em modo somente leitura.
+   Caso selecione "outro equipamento", a indicação é feita por digitação de hostname ou patrimônio com
+   exigência de correspondência exata. O escopo autorizado é derivado estritamente da identidade autenticada
+   do card e do vínculo da máquina atual com sua respectiva unidade/secretaria (e não apenas do nome informado
+   pelo solicitante). Se o equipamento não for localizado dentro desse escopo autorizado, a abertura do chamado
+   é bloqueada.
+5. **Criação do chamado e roteamento:** O ticket no GLPI é criado imediatamente após as perguntas
+   iniciais e o atendimento é direcionado para a fila correspondente à unidade/setor do equipamento.
+6. **Sessão, anexos e notificações:** O chat pode ser fechado e retomado a qualquer momento sem perda
+   de contexto. O envio de imagens e documentos é suportado desde a primeira versão. Mensagens recebidas
+   com a janela fechada disparam notificação nativa do Windows e alerta visual/contador no ícone da bandeja.
+7. **Contingência offline:** Se o servidor WACalls estiver indisponível, o card exibe números de telefone
+   e WhatsApp de suporte para contingência imediata.
+8. **Identidade e segurança do dispositivo:** O card atual coleta apenas hostname, IPv4 e serial da BIOS
+   (WMI), sem uso de `MachineGuid` ou de qualquer fingerprint criptográfico. Para a integração futura, a
+   máquina utilizará um identificador estável baseado no Windows/`MachineGuid` combinado a uma credencial
+   individual de dispositivo emitida pelo servidor no registro da instalação, revogável isoladamente e sem
+   privilégios administrativos. O identificador de instalação atua exclusivamente para correlação cadastral,
+   nunca como fator suficiente de autenticação. A credencial será armazenada com proteção nativa do Windows,
+   definindo-se o escopo (`CurrentUser` vs. `LocalMachine`) após confirmação do modelo de contas das estações
+   (conta compartilhada vs. múltiplos perfis).
+9. **Transição de canal e encerramento:** A migração para o WhatsApp ocorre somente após oferta proativa
+   do técnico e aceite explícito do funcionário; após o aceite, o WACalls envia automaticamente a primeira
+   mensagem no WhatsApp. O técnico realiza o encerramento diretamente no cockpit, sincronizando o status com
+   o GLPI e notificando o funcionário no card.
+10. **Cockpit técnico ServiceOps:** Na interface técnica do WACalls, módulos de WhatsApp, ligações, Kanban,
+    campanhas e fluxos permanecem em área secundária, priorizando chamados, filas, atendimentos e telemetria.
+Motivo: Estabelecer uma experiência de suporte completa, segura e ergonômica para o servidor público,
+sem impor fricção técnica ou categorizações indevidas, garantindo privacidade em computadores compartilhados
+e mantendo rigor de segurança no acesso aos ativos.
+Alternativas consideradas: Exibir histórico anterior ao reabrir chamado — rejeitada (risco de privacidade
+em máquinas compartilhadas); seleção livre em dropdown global de equipamentos — rejeitada (violação de escopo);
+autenticação exclusiva por fingerprint — rejeitada (risco de clonagem).
+Consequências: Orientará os contratos de API da Fase 4A (`Conversation Core`) e a implementação do card na Fase 4B.
+
 ## Modelo para novas decisões
 
 ```text

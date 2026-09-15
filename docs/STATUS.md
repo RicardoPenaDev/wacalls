@@ -1,80 +1,51 @@
 # Estado atual
 
 Atualizado em: 2026-09-15
-Fase atual: Fase 1 — MVP GLPI + Tactical
-Tarefa atual: `T-007` — Etapas 7.1–7.3 concluídas e publicadas. Etapa 7.4
-(Homologação Real Controlada): Gates 1–4 executados; GLPI aprovado (ticket
-#4, aberto, intocado). Tactical ainda não aprovado após duas correções
-publicadas (7.4-R1 `a014e58`, 7.4-R2 `162e8cf`) e uma terceira, 7.4-R3,
-implementada agora com a causa raiz comprovada e corrigida (`local_ips`:
-string vs. `[]string`) — commit local, **não publicada**. Gate 5 não
-iniciado.
+Fase atual: Fase 1 — MVP GLPI + Tactical (T-007 Gate 4 concluído e publicado;
+Gate 5 interrompido); planejamento de realinhamento ServiceOps em andamento (T-008).
+Tarefa atual: `T-008` — Realinhamento de produto (central técnica + portal do
+card Windows). F0 (inventário técnico do card) concluído. Próximo passo técnico:
+correção isolada da persistência automática de vínculo (D-025).
 
-## Status das Etapas da T-007
+## Estado das Entregas e Fases
 
-- **7.1–7.2:** Concluídas e publicadas em `origin/main`.
-- **7.3 (Suíte E2E Permanente):** Concluída, publicada e **validada no GitHub
-  Actions**. Commit `1696cfb5f7b766a17d1cc864bd21db83cc214d28`. Mitigações de
-  travamento de CI, timeouts escalonados e teste de teardown descritos em
-  `docs/tasks/T-007-HOMOLOGACAO-HARDENING-DEPLOY.md`. Matriz E2E 12/12 (ver
-  seção abaixo).
-- **7.4 (Homologação Real Controlada):** ambiente pessoal de Ricardo, dados
-  sintéticos, ticket `[HOMOLOGAÇÃO T-007] Validação controlada RicardoSMS`.
-  - **Gates 1–3:** Aprovados (preflight read-only; pareamento WhatsApp;
-    mensagem controlada com ressalva D-2B-01; integrações read-only).
-  - **Gate 4 GLPI:** Aprovado — ticket real **#4** criado (`external_id`
-    canônico, `glpi_computer_id=59` confirmado em `device_bindings` e no
-    texto do ticket). Permanece aberto; **nunca alterado desde a criação**,
-    em nenhuma das tentativas abaixo.
-  - **Gate 4 Tactical — histórico de tentativas (ainda não aprovado):**
-    1. **Tentativa original:** `missing_tactical`. Causa comprovada por
-       código: `SupportService` descartava o `tactical.Agent` retornado
-       por `FindAgentByHostname` sem persistir `tactical_agent_id`.
-    2. **7.4-R1** (publicado — commit `a014e58dedcd91acb7f509a99ea67a726342820b`,
-       `origin/main`, CI "E2E Support Suite" verde): corrige o descarte
-       acima; hardening de `parseLastSeen` para formato legado do Tactical
-       (D-022, causa daquele formato nunca confirmada). Refresh seguinte:
-       ainda `missing_tactical`, **zero log** explicando por quê —
-       `RefreshDeviceBinding` descartava qualquer erro do Tactical sem
-       registrar nada.
-    3. **7.4-R2** (publicado — commit `162e8cfc55df4ee7ba711e4459b4a9ef4c02fb7c`,
-       `origin/main`, CI verde; D-023): observabilidade sanitizada —
-       categorias tipadas (`ErrTimeout`/`ErrCanceled` novos), log por
-       categoria + status HTTP, hostname só como hash, not-found (`INFO`)
-       diferenciado de falha real (`WARN`). Refresh seguinte revelou
-       `category=parse_error`, mas o erro Go original ainda era descartado
-       ao virar `ErrBadResponse`, sem detalhe estrutural.
-    4. **Diagnóstico offline (2026-09-15, sem alterar código):**
-       reprodução local do decode contra o corpo real capturado confirmou
-       `*json.UnmarshalTypeError` em `local_ips`: a API do Tactical retorna
-       `local_ips` como **string** (endereço único, ou vários separados
-       por vírgula + espaço — confirmado em 29/29 agentes reais: 26
-       únicos, 3 com vírgula, 0 arrays, 0 outros formatos) enquanto
-       `listAgentDTO.LocalIPs` esperava `[]string`. `json.Unmarshal`
-       abortava o array inteiro — **qualquer** hostname do tenant ficaria
-       `missing_tactical`, não só RicardoSMS; não é falha de rede
-       transitória, é 100% reprodutível enquanto a API responder nesse
-       formato.
-    5. **7.4-R3** (implementada, commit local, **NÃO publicada**; refresh
-       real **NÃO repetido**): corrige a causa raiz — ver **D-024**.
-       `flexibleLocalIPs` aceita string única, string separada por vírgula
-       (com `TrimSpace`), array de strings, `null` e string vazia; um tipo
-       verdadeiramente incompatível (number/boolean/object/elemento não-
-       string em array) marca só aquele campo como inválido
-       (`LocalIPsValid=false`) sem abortar o agente nem os demais. Erros de
-       decode remanescentes (`*json.UnmarshalTypeError`/`*json.SyntaxError`
-       em qualquer outro campo) agora preservam campo/tipo Go/tipo
-       JSON/offset sanitizados em vez de serem descartados por completo.
-       Testes cobrem os 12 formatos pedidos (IPv4/IPv6/espaços/vazio/null/
-       array único/array múltiplo/vírgula/number/boolean/object/elemento
-       inválido em array) mais um teste de ponta a ponta com
-       `tactical.Client` real (não mock) contra fixture com o schema real
-       (dados sintéticos, RFC 5737), provando `missing_tactical → matched`
-       com `glpi_computer_id=59` preservado. Validação: `gofmt`,
-       `go vet ./...`, `go build ./...`, `go test -count=1 ./...` (100%
-       verde), `npm test` (21/21), `npm run build`, `npm run test:e2e`
-       (12/12), `git diff --check` — todos aprovados.
-  - **Gate 5:** **NÃO iniciado.**
+- **T-007 (MVP GLPI + Tactical):**
+  - **Gates 1-3:** Aprovados.
+  - **Gate 4 (GLPI + Tactical):** Concluído e publicado em `origin/main`
+    (commits `a014e58`, `162e8cf` e `f883897`). CI verde.
+  - **Gate 5 (Homologação de Interface):** Interrompido a pedido do usuário
+    para realinhamento de produto (T-008).
+  - **Painel lateral atual:** Baseline técnico provisório (não representa a
+    experiência final ServiceOps).
+  - **Defeito estrutural de persistência:** Identificado na resolução automática
+    por hostname (`device_binding_id=NULL`, ver D-025) — pendente de correção.
+  - **Homologação da interface final ServiceOps:** Nenhuma homologação concluída.
+
+- **T-008 (Realinhamento de Produto e Card Windows):**
+  - **F0 — Inventário técnico do card Windows:** Concluído. Código localizado
+    e inspecionado em diretório externo ao repositório público.
+    - App funcional em C# 12, .NET 8, WPF com `NotifyIcon` na bandeja do sistema.
+    - Estado atual: coleta local de hostname, IPv4 e serial da BIOS via WMI;
+      não utiliza `MachineGuid` nem `machineFingerprint()`.
+    - Botão atual abre portal Self-Service do GLPI no navegador padrão.
+    - Sem comunicação HTTP própria, sem portas abertas, sem autenticação de dispositivo.
+    - Janela fixa de 360x470 sem redimensionamento; viável para evolução na mesma
+      tecnologia mediante modularização em controles/telas (UserControls).
+    - Código ainda não possui repositório Git próprio; deploy e atualizações dependem
+      do Tactical RMM; `config.json` local adulterável; sem assinatura digital (Authenticode).
+    - Estado futuro proposto: identificador de instalação estável baseado no Windows/`MachineGuid`
+      mais credencial individual emitida pelo servidor com proteção nativa do Windows
+      (escopo `CurrentUser` vs. `LocalMachine` a definir após validação de perfis).
+      O identificador nunca equivale a autenticação.
+  - **Fases e dependências da T-008:**
+    - F0 — Inventário do card: Concluído.
+    - Fix D-025 — Persistência do `device_binding_id`: Próxima.
+    - F1 — Conversation Core: Depende de Fix D-025.
+    - F2 — Filas e roteamento por unidade/setor: Depende do contexto de equipamento existente e F1.
+    - F3 — Interface ServiceOps do técnico: Depende de F1 e F2.
+    - F4 — Identidade do dispositivo e portal/chat no card: Depende de F0, Fix D-025, F1, F2 e F3.
+    - F5 — Migração consentida Portal ↔ WhatsApp: Depende de F1 e F4.
+    - F6 — Encerramento e sincronização GLPI: Depende de F1, F3 e F4.
 
 ## Matriz E2E (12/12, todos com assertion real no navegador)
 
@@ -98,49 +69,43 @@ iniciado.
 - **D-021:** Modo E2E restrito (`-e2e-mode`), sessão sintética em memória,
   validação estrutural de `runDir`/DB temporário, CA privada restrita a
   loopback e validação única via `precheckE2EBoot`.
-- **D-2B-01:** Ressalva do Gate 2B — mensagem manual adicional de Ricardo
-  durante o teste controlado; não foi duplicidade do sistema.
+- **D-2B-01:** Ressalva do Gate 2B — mensagem manual adicional durante o teste
+  controlado; não foi duplicidade do sistema.
 - **D-022:** `parseLastSeen` do Tactical trata formato legado sem offset
-  (`MM/DD/YYYY HH:mm:ss`) como não confiável em vez de assumir UTC/local.
-  Fuso inconclusivo em 2026-09-15; a própria ocorrência desse formato como
-  conteúdo bruto da API durante o Gate 4 também não tem evidência
-  sobrevivente (ver Gate 4 acima e `internal/tactical/client.go`).
-- **D-023:** Observabilidade sanitizada de erros do Tactical (T-007 7.4-R2):
-  categorias tipadas (`ErrTimeout`/`ErrCanceled` novos) e log sanitizado
-  (categoria + status HTTP, hostname só como hash) para toda falha de
-  `FindAgentByHostname`, antes descartada sem log. Detalhe completo em
-  `docs/DECISIONS.md`.
-- **D-024:** Parser tolerante para `local_ips` do Tactical (T-007 7.4-R3):
-  aceita string única, string separada por vírgula, array de strings, null
-  e string vazia; tipo verdadeiramente incompatível marca só o campo como
-  inválido, nunca aborta o agente. Causa raiz do `missing_tactical`
-  observado em duas tentativas reais de refresh. Detalhe completo em
-  `docs/DECISIONS.md`.
+  como não confiável em vez de assumir UTC/local.
+- **D-023:** Observabilidade sanitizada de erros do Tactical: categorias tipadas
+  e log sanitizado (hash de hostname, sem segredos).
+- **D-024:** Parser tolerante para `local_ips` do Tactical: aceita string, lista
+  separada por vírgula, array de strings e null sem quebrar processamento.
+- **D-025:** Toda resolução automática exata de equipamento deve persistir o vínculo
+  (`device_binding_id` em `support_requests`; `glpi_computer_id` conforme modelo atual;
+  `tactical_agent_id` mantido em `device_bindings` sem duplicação). Correspondências
+  ausentes ou ambíguas bloqueiam associação silenciosa.
+- **D-026:** Requisitos de produto do portal do agente Windows: card compacto que expande
+  para chat; lista de chamados ativos sem histórico pregresso completo (chamados encerrados
+  não aparecem); abertura de chamado ativo não exibe histórico anterior mas permite novas
+  mensagens e respostas subsequentes; nome e telefone opcional; computador atual (somente leitura)
+  ou outro equipamento (digitação exata com escopo derivado da identidade do card e vínculo com
+  a unidade, bloqueando sem match); descrição livre com título automático; ticket GLPI imediato;
+  fila por unidade/setor; chat retomável; anexos em v1; notificações Windows e alerta no ícone;
+  contingência offline; migração consentida para WhatsApp com envio inicial pelo WACalls;
+  encerramento pelo técnico com aviso; e centralização técnica com WhatsApp em área secundária.
 
 ## Bloqueios e Próximos Passos Obrigatórios
 
-1. **Próxima Ação:** Autorização para push do commit local de correção
-   7.4-R3 (parser tolerante de `local_ips` + preservação sanitizada de
-   erro de decode).
-2. Após o push, autorizar **uma** nova chamada controlada a
-   `POST /api/support/devices/{id}/refresh` no binding `RicardoSMS`
-   existente (ticket #4 intocado, sem chamado novo). Com a causa raiz
-   corrigida, o resultado esperado é `match_status=matched`; se ainda
-   falhar, o log sanitizado (7.4-R2) identifica categoria e status HTTP,
-   e agora também campo/tipo Go/tipo JSON/offset quando for outro
-   problema de decode (7.4-R3).
-3. Confirmar timezone real do formato legado do Tactical caso ele volte a
-   ocorrer, antes de tratá-lo como confiável.
-4. Após confirmação da Tactical em homologação real, avançar para o Gate 5.
-5. **Instrução para a próxima IA:** Ler `AGENTS.md`, `docs/STATUS.md`,
-   `docs/DECISIONS.md` e `docs/tasks/T-007-HOMOLOGACAO-HARDENING-DEPLOY.md`.
+1. **Próxima Ação Técnica:** Implementar a correção isolada da persistência de
+   `device_binding_id` na criação automática de chamado (D-025) com testes unitários
+   em ambiente isolado (sem chamadas externas e sem backfill em tickets passados).
+2. Ticket **#4** no GLPI de homologação: registro formal do T-007 Gate 4, protegido e
+   preservado. Ticket **#5**: demonstração visual complementar, intocado.
+3. Confirmar timezone real do formato legado do Tactical caso volte a ocorrer (D-022).
+4. **Instrução para a próxima IA:** Ler `AGENTS.md`, `docs/STATUS.md`, `docs/DECISIONS.md`
+   e `docs/tasks/T-008-REALINHAMENTO-PORTAL-CARD.md`.
 
 ## Estado Git
 
 - Branch: `main`.
-- `origin/main` == `HEAD` em `162e8cfc55df4ee7ba711e4459b4a9ef4c02fb7c`
-  (7.4-R2, publicado, CI "E2E Support Suite" verde).
-- Commit local pendente de push: correção 7.4-R3 (`flexibleLocalIPs`
-  tolerante a string/array/vírgula/null; preservação sanitizada de
-  `*json.UnmarshalTypeError`/`*json.SyntaxError` em `tactical.Error`).
-- Push: Não realizado.
+- `origin/main` == `HEAD` em `f88389734a2e68b1a9fd8b274f74a3f18a97dee6`
+  (7.4-R3 publicado, CI verde).
+- Commits locais: nenhum commit criado nesta etapa.
+- Push: N/A. Alterações restritas a documentação de alinhamento.

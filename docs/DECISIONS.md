@@ -310,6 +310,66 @@ identidade do agente (`agent_id`, `hostname`, `status`) nunca é perdida por
 causa disso; `device_bindings.tactical_agent_id` passa a ser preenchido
 corretamente mesmo quando `last_seen` não é confiável.
 
+## D-023 — Observabilidade sanitizada e categorizada de erros do Tactical (T-007 7.4-R2)
+
+Data: 2026-09-15 · Status: aceita
+
+Decisão: `RefreshDeviceBinding` e a resolução best-effort de equipamento em
+`CreateTicket` (`cmd/server/supportservice.go`) só ramificavam em
+`tacErr == nil`; qualquer erro de `tactical.FindAgentByHostname` era
+descartado sem nenhum log, tornando not-found, falha de autenticação,
+rate-limit, timeout e erro 5xx todos indistinguíveis a posteriori. Uma
+tentativa real de refresh em 2026-09-15 (binding `RicardoSMS`, pós-7.4-R1)
+terminou em `match_status=missing_tactical` sem nenhuma linha de log
+explicando por quê — uma checagem manual, read-only, segundos depois,
+encontrou o agente presente e válido no Tactical, tornando a causa exata
+dessa execução específica não reconstituível. Corrigido em duas camadas:
+(1) `internal/tactical` ganha `ErrTimeout` e `ErrCanceled` como `Kind`
+tipados — `get()` agora classifica via `errors.Is` sobre o erro retornado
+por `http.Client.Do`, o que detecta corretamente tanto o `Timeout`
+configurado do próprio cliente quanto o deadline/cancelamento do contexto
+do chamador (antes, só `ctx.Err()` era checado, que nunca via o `Timeout`
+do cliente disparar sem deadline do chamador — caía no `ErrUnavailable`
+genérico, indistinguível de falha de rede/DNS/TLS); (2) `cmd/server` ganha
+`tacticalErrorCategory` (mapeia qualquer erro do Tactical para uma
+categoria pequena e estável — `not_found`, `auth`, `rate_limited`,
+`timeout`, `canceled`, `unavailable`, `parse_error`, `conflict`,
+`ambiguous`, `bad_request`, `config`, `unknown` — mais o status HTTP
+quando existir, nunca URL, header, corpo de resposta ou API key) e
+`hashHostnameForLog` (hash SHA-256 truncado do hostname normalizado —
+nunca o hostname em texto plano em nenhum log relacionado a Tactical).
+`RefreshDeviceBinding`/`CreateTicket` passam a logar de forma
+diferenciada: agente resolvido e válido não loga nada; agente resolvido
+com `last_seen` não confiável continua em `WARN` (já existia); agente
+encontrado por hostname mas com `agent_id` vazio na resposta upstream
+**deixa de ser tratado como `foundTactical=true`** — persistir
+`match_status=matched` com `tactical_agent_id` em branco seria pior que
+`missing_tactical`, então esse caso agora é logado em `WARN` com uma
+mensagem própria ("discarding match") e conta como não resolvido; uma
+falha real de consulta loga em `WARN` com categoria e status HTTP;
+not-found simples loga em `INFO`, categoria própria, nível deliberadamente
+mais baixo que uma falha real.
+Motivo: sem essa observabilidade, qualquer falha futura do Tactical durante
+um refresh ou criação de chamado repete o mesmo impasse de 2026-09-15 —
+resultado observável (`missing_tactical`) sem causa reconstituível — e cada
+investigação exigiria instrumentação ad-hoc read-only fora do código
+versionado.
+Alternativas consideradas: manter o comportamento silencioso e depender
+apenas de reprodução ao vivo fora de banda (rejeitada — já provou ser
+insuficiente no incidente de 2026-09-15); logar o hostname em texto plano
+para facilitar correlação (rejeitada — viola a minimização de dados de
+`docs/SECURITY.md`); tratar `agent_id` vazio como `matched` mesmo assim
+(rejeitada — persistiria um identificador inútil e uma etiqueta de estado
+incorreta no `device_binding`).
+Consequências: falhas futuras do Tactical em `refresh_device_binding` e
+`create_ticket` são diagnosticáveis diretamente pelo log estruturado, sem
+expor segredos ou dados pessoais; nenhuma mudança de comportamento
+observável pelo usuário final (o resultado funcional de cada caminho
+permanece o mesmo — o que muda é exclusivamente a informação disponível
+para diagnóstico); testes cobrem log sanitizado sem hostname cru,
+diferenciação not-found vs. falha real, e `agent_id` vazio não virando
+`matched` (`cmd/server/supportservice_test.go`).
+
 ## Modelo para novas decisões
 
 ```text

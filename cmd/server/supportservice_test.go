@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1174,5 +1175,126 @@ func TestSupportService_InputValidation(t *testing.T) {
 				t.Fatalf("expected error %v, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func newBufferedLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	return slog.New(h), &buf
+}
+
+// TestSupportService_RefreshDeviceBinding_TacticalErrorSanitizedLog covers
+// T-007 7.4-R2: a real Tactical API failure during refresh must produce a
+// sanitized, categorized log line (integration/operation/category/status)
+// distinct from a plain "not found", must be logged at a higher level than
+// "not found", and must never leak the raw hostname.
+func TestSupportService_RefreshDeviceBinding_TacticalErrorSanitizedLog(t *testing.T) {
+	_, store, bStore, mockG, mockT, _ := setupTestSupportService(t)
+	ctx := context.Background()
+
+	binding, err := bStore.Upsert(ctx, DeviceBinding{
+		OwnerID:        "tenant-log",
+		TenantID:       "tenant-log",
+		Hostname:       "SECRET-HOST-99",
+		GLPIComputerID: "59",
+		MatchStatus:    "missing_tactical",
+	})
+	if err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	mockG.findComputerFn = func(ctx context.Context, hostname string) (glpi.Computer, error) {
+		return glpi.Computer{ID: "59", Name: hostname}, nil
+	}
+
+	// 1) A genuine API failure (not a "not found"): must log at Warn with
+	// category "unavailable" and the real HTTP status; the raw hostname
+	// must never appear in the log text.
+	logger, buf := newBufferedLogger()
+	svc := NewSupportService(store, bStore, mockG, mockT, logger)
+	mockT.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		return tactical.Agent{}, &tactical.Error{Op: "find agent", Kind: tactical.ErrUnavailable, StatusCode: 503}
+	}
+	if _, err := svc.RefreshDeviceBinding(ctx, ServiceRefreshDeviceInput{ID: binding.ID, TenantID: "tenant-log"}); err != nil {
+		t.Fatalf("RefreshDeviceBinding: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"category":"unavailable"`) {
+		t.Fatalf("expected category=unavailable in log, got: %s", out)
+	}
+	if !strings.Contains(out, `"httpStatus":503`) {
+		t.Fatalf("expected httpStatus=503 in log, got: %s", out)
+	}
+	if !strings.Contains(out, `"integration":"tactical"`) || !strings.Contains(out, `"operation":"refresh_device_binding"`) {
+		t.Fatalf("expected integration/operation attrs in log, got: %s", out)
+	}
+	if strings.Contains(out, "SECRET-HOST-99") {
+		t.Fatalf("log leaked raw hostname: %s", out)
+	}
+	if !strings.Contains(out, `"level":"WARN"`) {
+		t.Fatalf("expected WARN level for a real API failure, got: %s", out)
+	}
+
+	// 2) A plain not-found must be its own category, logged at a lower
+	// (Info) level than the real API failure above.
+	logger2, buf2 := newBufferedLogger()
+	svc2 := NewSupportService(store, bStore, mockG, mockT, logger2)
+	mockT.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		return tactical.Agent{}, &tactical.Error{Op: "find agent", Kind: tactical.ErrNotFound}
+	}
+	if _, err := svc2.RefreshDeviceBinding(ctx, ServiceRefreshDeviceInput{ID: binding.ID, TenantID: "tenant-log"}); err != nil {
+		t.Fatalf("RefreshDeviceBinding: %v", err)
+	}
+	out2 := buf2.String()
+	if !strings.Contains(out2, `"category":"not_found"`) {
+		t.Fatalf("expected category=not_found in log, got: %s", out2)
+	}
+	if !strings.Contains(out2, `"level":"INFO"`) {
+		t.Fatalf("expected INFO level for not_found, got: %s", out2)
+	}
+	if strings.Contains(out2, "SECRET-HOST-99") {
+		t.Fatalf("log leaked raw hostname: %s", out2)
+	}
+}
+
+// TestSupportService_RefreshDeviceBinding_EmptyAgentIDNotMatched covers
+// T-007 7.4-R2: an upstream Tactical response that matches the hostname but
+// carries an empty agent_id must not be treated as a resolved match — that
+// would otherwise persist match_status="matched" with a blank, unusable
+// tactical_agent_id. glpi_computer_id must still be preserved (7.4-R2
+// resilience: a Tactical mapping problem must never blank out GLPI state).
+func TestSupportService_RefreshDeviceBinding_EmptyAgentIDNotMatched(t *testing.T) {
+	svc, _, bStore, mockG, mockT, _ := setupTestSupportService(t)
+	ctx := context.Background()
+
+	binding, err := bStore.Upsert(ctx, DeviceBinding{
+		OwnerID:        "tenant-mapping",
+		TenantID:       "tenant-mapping",
+		Hostname:       "EMPTY-AGENT-HOST",
+		GLPIComputerID: "59",
+		MatchStatus:    "missing_tactical",
+	})
+	if err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	mockG.findComputerFn = func(ctx context.Context, hostname string) (glpi.Computer, error) {
+		return glpi.Computer{ID: "59", Name: hostname}, nil
+	}
+	mockT.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		return tactical.Agent{AgentID: "", Hostname: hostname}, nil
+	}
+
+	updated, err := svc.RefreshDeviceBinding(ctx, ServiceRefreshDeviceInput{ID: binding.ID, TenantID: "tenant-mapping"})
+	if err != nil {
+		t.Fatalf("RefreshDeviceBinding: %v", err)
+	}
+	if updated.TacticalAgentID != "" {
+		t.Fatalf("expected tactical_agent_id to stay empty, got %q", updated.TacticalAgentID)
+	}
+	if updated.MatchStatus == "matched" {
+		t.Fatalf("expected match_status not to become matched from an empty agent_id, got %q", updated.MatchStatus)
+	}
+	if updated.GLPIComputerID != "59" {
+		t.Fatalf("expected glpi_computer_id preserved, got %q", updated.GLPIComputerID)
 	}
 }

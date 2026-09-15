@@ -279,6 +279,11 @@ func TestParseRetryAfterHTTPDate(t *testing.T) {
 }
 
 func TestTimeoutAndCancellation(t *testing.T) {
+	// T-007 7.4-R2: all three flavors of "did not finish in time or was
+	// aborted" must now classify as a typed *Error (ErrTimeout/ErrCanceled)
+	// instead of falling through to the generic ErrUnavailable or leaking a
+	// bare stdlib context error — this is what makes the category safe and
+	// reliable to log (see tacticalErrorCategory in cmd/server).
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
@@ -287,21 +292,21 @@ func TestTimeoutAndCancellation(t *testing.T) {
 	cfg := testConfig(server.URL)
 	cfg.Timeout = 20 * time.Millisecond
 	client := mustClient(t, cfg)
-	if _, err := client.ListAgents(context.Background()); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("HTTP client timeout: expected ErrUnavailable, got %v", err)
+	if _, err := client.ListAgents(context.Background()); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("HTTP client timeout: expected ErrTimeout, got %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client = mustClient(t, testConfig(server.URL))
-	if _, err := client.ListAgents(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("caller cancellation: expected context.Canceled, got %v", err)
+	if _, err := client.ListAgents(ctx); !errors.Is(err, ErrCanceled) {
+		t.Fatalf("caller cancellation: expected ErrCanceled, got %v", err)
 	}
 
 	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer deadlineCancel()
-	if _, err := client.ListAgents(deadlineCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("caller deadline: expected context.DeadlineExceeded, got %v", err)
+	if _, err := client.ListAgents(deadlineCtx); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("caller deadline: expected ErrTimeout, got %v", err)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"wacalls/internal/glpi"
+	"wacalls/internal/tactical"
 )
 
 // SupportService orchestrates support request persistence, equipment resolution,
@@ -259,12 +262,32 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 			var tacticalAgentID string
 
 			if s.tactical != nil {
-				if agent, tacErr := s.tactical.FindAgentByHostname(ctx, normHost); tacErr == nil {
+				agent, tacErr := s.tactical.FindAgentByHostname(ctx, normHost)
+				switch {
+				case tacErr == nil && agent.AgentID != "":
 					foundTactical = true
 					tacticalAgentID = agent.AgentID
 					if !agent.LastSeenValid {
-						s.log.Warn("support: tactical agent located with unparseable last_seen, ignoring stale telemetry", "tenant", in.TenantID)
+						s.log.Warn("support: tactical agent located with unparseable last_seen, ignoring stale telemetry",
+							"tenant", in.TenantID, "hostname", hashHostnameForLog(normHost))
 					}
+				case tacErr == nil:
+					// Matched by hostname but the upstream response carried
+					// no agent_id: not a usable Tactical identity. Kept
+					// distinct from "not found" and from a request-level
+					// failure (T-007 7.4-R2).
+					s.log.Warn("support: tactical agent matched but agent_id is empty, discarding match",
+						"tenant", in.TenantID, "hostname", hashHostnameForLog(normHost))
+				default:
+					category, statusCode := tacticalErrorCategory(tacErr)
+					level := slog.LevelWarn
+					if category == "not_found" {
+						level = slog.LevelInfo
+					}
+					s.log.Log(ctx, level, "support: tactical lookup did not resolve",
+						"tenant", in.TenantID, "hostname", hashHostnameForLog(normHost),
+						"operation", "create_ticket", "integration", "tactical",
+						"category", category, "httpStatus", statusCode)
 				}
 			}
 			if s.glpi != nil {
@@ -608,6 +631,58 @@ func equipmentMatchStatus(foundTactical, foundGLPI bool) string {
 	}
 }
 
+// tacticalErrorCategory maps a Tactical client error onto a small, stable
+// set of sanitized categories safe to log (T-007 7.4-R2). It never returns
+// or logs the upstream error text, URL, headers, or API key — only the
+// *tactical.Error's already-safe Kind/StatusCode fields. statusCode is 0
+// when the failure never produced an HTTP response (timeout, cancellation,
+// network, config).
+func tacticalErrorCategory(err error) (category string, statusCode int) {
+	if err == nil {
+		return "", 0
+	}
+	var tacErr *tactical.Error
+	if !errors.As(err, &tacErr) {
+		return "unknown", 0
+	}
+	statusCode = tacErr.StatusCode
+	switch {
+	case errors.Is(tacErr.Kind, tactical.ErrNotFound):
+		return "not_found", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrAuth):
+		return "auth", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrRateLimited):
+		return "rate_limited", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrTimeout):
+		return "timeout", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrCanceled):
+		return "canceled", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrUnavailable):
+		return "unavailable", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrBadResponse):
+		return "parse_error", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrConflict):
+		return "conflict", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrAmbiguous):
+		return "ambiguous", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrBadRequest):
+		return "bad_request", statusCode
+	case errors.Is(tacErr.Kind, tactical.ErrConfig):
+		return "config", statusCode
+	default:
+		return "unknown", statusCode
+	}
+}
+
+// hashHostnameForLog returns a short, non-reversible correlation token for
+// a hostname. It is safe to log: the original hostname cannot be recovered
+// from it, while occurrences of the same hostname remain recognizable
+// across log lines (T-007 7.4-R2 — logs must never carry a raw hostname).
+func hashHostnameForLog(hostname string) string {
+	sum := sha256.Sum256([]byte(normalizeHostname(hostname)))
+	return "h:" + hex.EncodeToString(sum[:])[:12]
+}
+
 // RefreshDeviceBinding re-runs read-only GLPI/Tactical hostname lookups for
 // an existing device binding (T-007 7.4-R1) and merges any newly confirmed
 // identifiers. The hostname is always the one already persisted on the
@@ -634,12 +709,31 @@ func (s *SupportService) RefreshDeviceBinding(ctx context.Context, in ServiceRef
 	var tacticalAgentID, glpiCompID string
 
 	if s.tactical != nil {
-		if agent, tacErr := s.tactical.FindAgentByHostname(ctx, normHost); tacErr == nil {
+		agent, tacErr := s.tactical.FindAgentByHostname(ctx, normHost)
+		switch {
+		case tacErr == nil && agent.AgentID != "":
 			foundTactical = true
 			tacticalAgentID = agent.AgentID
 			if !agent.LastSeenValid {
-				s.log.Warn("support: device refresh located tactical agent with unparseable last_seen, ignoring stale telemetry", "tenant", in.TenantID, "bindingId", existing.ID)
+				s.log.Warn("support: device refresh located tactical agent with unparseable last_seen, ignoring stale telemetry",
+					"tenant", in.TenantID, "bindingId", existing.ID, "hostname", hashHostnameForLog(normHost))
 			}
+		case tacErr == nil:
+			// Matched by hostname but the upstream response carried no
+			// agent_id: not a usable Tactical identity. Kept distinct from
+			// "not found" and from a request-level failure (T-007 7.4-R2).
+			s.log.Warn("support: device refresh located tactical agent with empty agent_id, discarding match",
+				"tenant", in.TenantID, "bindingId", existing.ID, "hostname", hashHostnameForLog(normHost))
+		default:
+			category, statusCode := tacticalErrorCategory(tacErr)
+			level := slog.LevelWarn
+			if category == "not_found" {
+				level = slog.LevelInfo
+			}
+			s.log.Log(ctx, level, "support: device refresh tactical lookup did not resolve",
+				"tenant", in.TenantID, "bindingId", existing.ID, "hostname", hashHostnameForLog(normHost),
+				"operation", "refresh_device_binding", "integration", "tactical",
+				"category", category, "httpStatus", statusCode)
 		}
 	}
 	if s.glpi != nil {

@@ -3,9 +3,11 @@
 Atualizado em: 2026-09-15
 Fase atual: Fase 1 — MVP GLPI + Tactical
 Tarefa atual: `T-007` — Etapas 7.1–7.3 concluídas e publicadas. Etapa 7.4
-(Homologação Real Controlada) em andamento: Gates 1–4 executados, correção
-7.4-R1 (tactical_agent_id não persistido + hardening de parsing do
-Tactical) implementada e validada. Gate 5 não iniciado.
+(Homologação Real Controlada) em andamento: Gates 1–4 executados; correção
+7.4-R1 publicada (`a014e58`, CI verde). Uma tentativa de refresh pós-7.4-R1
+não resolveu o Tactical; correção 7.4-R2 (observabilidade sanitizada +
+hardening de resiliência) implementada, commit local, **não publicada**.
+Gate 5 não iniciado.
 
 ## Status das Etapas da T-007
 
@@ -53,7 +55,8 @@ Tactical) implementada e validada. Gate 5 não iniciado.
     forma relatada antes — consistente com artefato de apresentação do
     PowerShell, não com conteúdo bruto da API, mas isso **não pode ser
     confirmado retroativamente com certeza absoluta**.
-  - **Correção 7.4-R1 (implementada, commit local pendente de push):**
+  - **Correção 7.4-R1 (publicada — commit `a014e58dedcd91acb7f509a99ea67a726342820b`,
+    `origin/main`, GitHub Actions "E2E Support Suite" verde):**
     - **Causa comprovada, corrigida:** `SupportService` agora captura e
       persiste `tactical_agent_id` a partir do `Agent` de
       `FindAgentByHostname`.
@@ -77,6 +80,30 @@ Tactical) implementada e validada. Gate 5 não iniciado.
     - Validação: `gofmt`, `go vet ./...`, `go build ./...`,
       `go test -count=1 ./...` (100% verde), `npm test` (21/21),
       `npm run build`, `npm run test:e2e` (12/12) — todos aprovados.
+  - **Tentativa de refresh pós-7.4-R1 (2026-09-15):** 1 chamada
+    `POST /api/support/devices/{id}/refresh` no binding `RicardoSMS`
+    existente (ticket #4 intocado). Resultado: `match_status` permaneceu
+    `missing_tactical`. Segundos depois, checagem read-only direta ao
+    Tactical encontrou `RicardoSMS` presente e válido — inconsistente com
+    falha persistente, mas **causa exata não reconstituível**:
+    `RefreshDeviceBinding` descartava o erro de `FindAgentByHostname` sem
+    log algum (not-found, auth, rate-limit, timeout e 5xx eram todos
+    silenciosos e indistinguíveis). Sem retry; estado preservado.
+  - **Correção 7.4-R2 (implementada, commit local, NÃO publicada; refresh
+    real NÃO repetido; ticket #4 intocado):** fecha exatamente essa lacuna
+    de observabilidade — ver **D-023** para o desenho completo. Resumo:
+    `internal/tactical` ganha `ErrTimeout`/`ErrCanceled` tipados; `cmd/server`
+    ganha log sanitizado por categoria (nunca URL/header/corpo/API key,
+    hostname só como hash) em toda falha do Tactical, com not-found (`INFO`)
+    diferenciado de falha real (`WARN`); um agente encontrado mas com
+    `agent_id` vazio na resposta deixa de virar `matched` incorretamente.
+    Resiliência existente preservada e testada: falha do Tactical nunca
+    apaga `glpi_computer_id`; `RefreshDeviceBinding` nunca cria ticket.
+    Validação: `gofmt`, `go vet ./...`, `go build ./...`,
+    `go test -count=1 ./...` (100% verde), `npm test` (21/21 — 1 flake
+    pré-existente de `runner-timeout.test.mjs`, não relacionado, confirmado
+    ao isolar), `npm run build`, `npm run test:e2e` (12/12),
+    `git diff --check` — todos aprovados.
   - **Gate 5:** **NÃO iniciado.**
 
 ## Matriz E2E (12/12, todos com assertion real no navegador)
@@ -108,28 +135,33 @@ Tactical) implementada e validada. Gate 5 não iniciado.
   Fuso inconclusivo em 2026-09-15; a própria ocorrência desse formato como
   conteúdo bruto da API durante o Gate 4 também não tem evidência
   sobrevivente (ver Gate 4 acima e `internal/tactical/client.go`).
+- **D-023:** Observabilidade sanitizada de erros do Tactical (T-007 7.4-R2):
+  categorias tipadas (`ErrTimeout`/`ErrCanceled` novos) e log sanitizado
+  (categoria + status HTTP, hostname só como hash) para toda falha de
+  `FindAgentByHostname`, antes descartada sem log. Detalhe completo em
+  `docs/DECISIONS.md`.
 
 ## Bloqueios e Próximos Passos Obrigatórios
 
-1. **Próxima Ação:** Autorização para push do commit de correção 7.4-R1.
-2. Retomar a homologação usando o ticket **#4** existente e o binding
-   `RicardoSMS` já criado: chamar `POST /api/support/devices/{id}/refresh`
-   (admin) para re-resolver o Tactical e confirmar `match_status=matched` e
-   `tactical_agent_id` preenchido — **sem** criar chamado novo.
+1. **Próxima Ação:** Autorização para push do commit local de correção
+   7.4-R2 (observabilidade sanitizada do Tactical).
+2. Após o push, autorizar **uma** nova chamada controlada a
+   `POST /api/support/devices/{id}/refresh` no binding `RicardoSMS`
+   existente (ticket #4 intocado, sem chamado novo). Se ainda falhar, o log
+   sanitizado agora identifica a categoria real (not_found/auth/
+   rate_limited/timeout/unavailable/parse_error/etc.) e o status HTTP.
 3. Confirmar timezone real do formato legado do Tactical caso ele volte a
    ocorrer, antes de tratá-lo como confiável.
-4. Após confirmação da 7.4-R1 em homologação real, avançar para o Gate 5.
+4. Após confirmação da Tactical em homologação real, avançar para o Gate 5.
 5. **Instrução para a próxima IA:** Ler `AGENTS.md`, `docs/STATUS.md`,
    `docs/DECISIONS.md` e `docs/tasks/T-007-HOMOLOGACAO-HARDENING-DEPLOY.md`.
 
 ## Estado Git
 
 - Branch: `main`.
-- `origin/main` inclui `1696cfb` (7.3, publicado) mais dois commits
-  paralelos não relacionados a T-007 (`1b89333`, `7b07f65` — filtros de
-  conexão e alertas Evolution API); sem sobreposição de arquivos, já
-  sincronizados via fast-forward.
-- Commit local pendente de push: correção 7.4-R1 (tactical_agent_id não
-  persistido, hardening preventivo de parsing do Tactical, endpoint de
-  refresh administrativo).
+- `origin/main` == `HEAD` em `a014e58dedcd91acb7f509a99ea67a726342820b`
+  (7.4-R1, publicado, CI "E2E Support Suite" verde).
+- Commit local pendente de push: correção 7.4-R2 (observabilidade
+  sanitizada de erros do Tactical — `ErrTimeout`/`ErrCanceled` tipados,
+  categorização sem dados sensíveis, `agent_id` vazio não vira `matched`).
 - Push: Não realizado.

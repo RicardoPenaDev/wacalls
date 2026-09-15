@@ -16,6 +16,13 @@ var (
 	ErrAmbiguous   = errors.New("ambiguous match")
 	ErrBadResponse = errors.New("bad response")
 	ErrConfig      = errors.New("invalid configuration")
+	// ErrTimeout covers both the client's own configured Timeout firing and
+	// a caller-supplied context deadline expiring (T-007 7.4-R2): both are
+	// observably the same "the request did not finish in time" condition.
+	ErrTimeout = errors.New("timeout")
+	// ErrCanceled means the caller's context was canceled before the
+	// request completed (T-007 7.4-R2).
+	ErrCanceled = errors.New("canceled")
 )
 
 // Error carries safe failure metadata without exposing URLs, response bodies,

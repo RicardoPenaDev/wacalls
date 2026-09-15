@@ -173,14 +173,24 @@ func (c *Client) get(ctx context.Context, path, op string) ([]byte, error) {
 	req.Header.Set("X-API-KEY", c.apiKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+		// errors.Is against the *url.Error returned by http.Client.Do
+		// correctly detects both a caller-supplied context deadline/cancel
+		// AND the client's own configured Timeout firing (net/http wraps
+		// the latter so it also satisfies context.DeadlineExceeded) — it is
+		// the single reliable check, unlike inspecting ctx.Err() alone,
+		// which misses the Timeout-fired-with-no-caller-deadline case
+		// (T-007 7.4-R2: this previously fell through to the generic
+		// ErrUnavailable, indistinguishable from a connection failure).
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			return nil, &Error{Op: op, Kind: ErrTimeout}
+		case errors.Is(err, context.Canceled):
+			return nil, &Error{Op: op, Kind: ErrCanceled}
+		case errors.Is(err, errCrossHostRedirect):
+			return nil, &Error{Op: op, Kind: ErrBadResponse}
+		default:
+			return nil, &Error{Op: op, Kind: ErrUnavailable}
 		}
-		kind := ErrUnavailable
-		if errors.Is(err, errCrossHostRedirect) {
-			kind = ErrBadResponse
-		}
-		return nil, &Error{Op: op, Kind: kind}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  Bell,
   Clock,
   Code2,
   CreditCard,
@@ -21,7 +22,7 @@ import { toast } from "sonner";
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { EvolutionAlertCard } from "@/components/domain/session/EvolutionAlertCard";
+import { EvolutionAlertModal } from "@/components/domain/session/EvolutionAlertModal";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { CreateConnectionModal } from "@/components/domain/session/CreateConnectionModal";
 import { EditConnectionModal } from "@/components/domain/session/EditConnectionModal";
@@ -30,6 +31,7 @@ import { DisconnectDialog } from "@/components/domain/session/DisconnectDialog";
 import { PaymentDialog } from "@/components/domain/session/PaymentDialog";
 import { AccountHealthDialog } from "@/components/domain/session/AccountHealthDialog";
 import { deleteSession, pairSession } from "@/services/sessions";
+import { getEvolutionAlert } from "@/services/settings";
 import { ensureSessionsWired, useSessions } from "@/stores/sessions";
 import type { SessionInfo } from "@/types/session";
 import { formatBRL, getInstancePlan } from "@/lib/instance-plan";
@@ -268,6 +270,8 @@ export const ConnectionsPage = () => {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "connected" | "disconnected">("all");
+  const [alertModalOpen, setAlertModalOpen] = useState(false);
+  const [alertsEnabled, setAlertsEnabled] = useState(false);
 
   const connectedCount = sessions.filter((s) => s.paired && s.state === "open").length;
   const disconnectedCount = sessions.length - connectedCount;
@@ -287,6 +291,9 @@ export const ConnectionsPage = () => {
 
   useEffect(() => {
     ensureSessionsWired();
+    getEvolutionAlert()
+      .then((cfg) => setAlertsEnabled(Boolean(cfg?.enabled)))
+      .catch(() => {});
   }, []);
 
   return (
@@ -298,13 +305,27 @@ export const ConnectionsPage = () => {
             <h2 className="text-lg font-semibold tracking-tight">{t("pages.connections.title")}</h2>
             <p className="text-sm text-muted-foreground">{t("pages.connections.subtitle")}</p>
           </div>
-          <Button onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> {t("pages.connections.newInstance")}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setAlertModalOpen(true)}
+              className="gap-2 border-border/80"
+              title="Configurar Notificações via Evolution API"
+            >
+              <Bell className="h-4 w-4 text-muted-foreground" />
+              <span>Mensagem API</span>
+              {alertsEnabled && (
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                </span>
+              )}
+            </Button>
+            <Button onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" /> {t("pages.connections.newInstance")}
+            </Button>
+          </div>
         </div>
-
-        {/* Evolution API Notification Card */}
-        <EvolutionAlertCard />
 
         {/* Filters & Search bar */}
         {sessions.length > 0 && (
@@ -491,6 +512,11 @@ export const ConnectionsPage = () => {
             void deleteSession(toDelete.id).catch((e) => toast.error((e as Error).message));
           }
         }}
+      />
+      <EvolutionAlertModal
+        open={alertModalOpen}
+        onOpenChange={setAlertModalOpen}
+        onUpdated={(enabled) => setAlertsEnabled(enabled)}
       />
 
       {/* Helpful footer link to the dedicated chat workspace */}

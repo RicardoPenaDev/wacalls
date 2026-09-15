@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { Bell, ChevronDown, ChevronUp, Eye, EyeOff, Loader2, Save, Send } from "lucide-react";
+import { Bell, Eye, EyeOff, Loader2, Save, Send } from "lucide-react";
 import { toast } from "sonner";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
 import {
   getEvolutionAlert,
   saveEvolutionAlert,
@@ -11,11 +11,16 @@ import {
   type EvolutionAlertConfig,
 } from "@/services/settings";
 
-export const EvolutionAlertCard = () => {
-  const [loading, setLoading] = useState(true);
+type Props = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onUpdated?: (enabled: boolean) => void;
+};
+
+export const EvolutionAlertModal = ({ open, onOpenChange, onUpdated }: Props) => {
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
 
   const [form, setForm] = useState<EvolutionAlertConfig>({
@@ -27,6 +32,8 @@ export const EvolutionAlertCard = () => {
   });
 
   useEffect(() => {
+    if (!open) return;
+    setLoading(true);
     getEvolutionAlert()
       .then((cfg) => {
         if (cfg) {
@@ -43,13 +50,15 @@ export const EvolutionAlertCard = () => {
         console.error("Falha ao carregar configurações da Evolution API:", err);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [open]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
       await saveEvolutionAlert(form);
       toast.success("Configurações de alerta salvas com sucesso!");
+      onUpdated?.(form.enabled);
+      onOpenChange(false);
     } catch (err) {
       toast.error((err as Error).message || "Erro ao salvar configurações");
     } finally {
@@ -74,54 +83,39 @@ export const EvolutionAlertCard = () => {
   };
 
   return (
-    <Card className="overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm">
-      {/* Header */}
-      <div
-        className="flex cursor-pointer items-center justify-between p-4 transition-colors hover:bg-muted/40"
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        <div className="flex items-center gap-3">
-          <div className="grid h-9 w-9 place-items-center rounded-lg bg-primary/10 text-primary">
-            <Bell className="h-4 w-4" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold">Notificação de Queda / Conexão (Evolution API)</h3>
-              {loading ? (
-                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-              ) : form.enabled ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                  Ativo
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                  Inativo
-                </span>
-              )}
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg gap-0 overflow-hidden p-0">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b px-5 py-4">
+          <div className="flex items-center gap-3">
+            <div className="grid h-9 w-9 place-items-center rounded-lg bg-primary/10 text-primary">
+              <Bell className="h-4 w-4" />
             </div>
-            <p className="text-xs text-muted-foreground">
-              Envie alertas no WhatsApp quando qualquer instância conectar ou desconectar.
-            </p>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold">Notificação de Queda / Conexão (Evolution API)</h3>
+                {loading ? (
+                  <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                ) : form.enabled ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    Ativo
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    Inativo
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Envie alertas no WhatsApp quando qualquer instância conectar ou desconectar.
+              </p>
+            </div>
           </div>
         </div>
 
-        <button
-          type="button"
-          aria-label={collapsed ? "Expandir" : "Recolher"}
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-          onClick={(e) => {
-            e.stopPropagation();
-            setCollapsed(!collapsed);
-          }}
-        >
-          {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
-        </button>
-      </div>
-
-      {/* Body */}
-      {!collapsed && (
-        <div className="space-y-4 border-t px-5 py-4">
+        {/* Body */}
+        <div className="space-y-4 px-5 py-5">
           {/* Toggle checkbox */}
           <label className="flex cursor-pointer items-center gap-2.5 text-sm font-medium select-none">
             <input
@@ -197,21 +191,31 @@ export const EvolutionAlertCard = () => {
               </p>
             </div>
           </div>
+        </div>
 
-          {/* Action buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+        {/* Footer */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 px-5 py-3.5">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleTest}
+            disabled={testing || saving || !form.apiUrl || !form.instanceName || !form.destination}
+            className="gap-1.5"
+          >
+            {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+            Testar Envio
+          </Button>
+
+          <div className="flex items-center gap-2">
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
-              onClick={handleTest}
-              disabled={testing || saving || !form.apiUrl || !form.instanceName || !form.destination}
-              className="gap-1.5"
+              onClick={() => onOpenChange(false)}
             >
-              {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              Testar Envio
+              Cancelar
             </Button>
-
             <Button
               type="button"
               size="sm"
@@ -224,7 +228,7 @@ export const EvolutionAlertCard = () => {
             </Button>
           </div>
         </div>
-      )}
-    </Card>
+      </DialogContent>
+    </Dialog>
   );
 };

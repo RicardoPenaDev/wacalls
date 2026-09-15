@@ -284,10 +284,13 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 					if category == "not_found" {
 						level = slog.LevelInfo
 					}
-					s.log.Log(ctx, level, "support: tactical lookup did not resolve",
+					attrs := []any{
 						"tenant", in.TenantID, "hostname", hashHostnameForLog(normHost),
 						"operation", "create_ticket", "integration", "tactical",
-						"category", category, "httpStatus", statusCode)
+						"category", category, "httpStatus", statusCode,
+					}
+					attrs = append(attrs, tacticalDecodeDetails(tacErr)...)
+					s.log.Log(ctx, level, "support: tactical lookup did not resolve", attrs...)
 				}
 			}
 			if s.glpi != nil {
@@ -674,6 +677,36 @@ func tacticalErrorCategory(err error) (category string, statusCode int) {
 	}
 }
 
+// tacticalDecodeDetails returns extra sanitized log attributes when the
+// failure was a JSON decode/shape mismatch (T-007 7.4-R3) — the struct
+// field's JSON name, the Go type expected, the JSON kind actually received
+// ("string", "number", "bool", "array", "object", "null" — never a value),
+// and a byte offset. Returns nil when not applicable. Never includes a
+// value, the response body, headers, URL, or the API key.
+func tacticalDecodeDetails(err error) []any {
+	var tacErr *tactical.Error
+	if !errors.As(err, &tacErr) {
+		return nil
+	}
+	if tacErr.DecodeField == "" && tacErr.DecodeGoType == "" && tacErr.DecodeJSONType == "" && tacErr.DecodeOffset == 0 {
+		return nil
+	}
+	var attrs []any
+	if tacErr.DecodeField != "" {
+		attrs = append(attrs, "decodeField", tacErr.DecodeField)
+	}
+	if tacErr.DecodeGoType != "" {
+		attrs = append(attrs, "decodeGoType", tacErr.DecodeGoType)
+	}
+	if tacErr.DecodeJSONType != "" {
+		attrs = append(attrs, "decodeJSONType", tacErr.DecodeJSONType)
+	}
+	if tacErr.DecodeOffset != 0 {
+		attrs = append(attrs, "decodeOffset", tacErr.DecodeOffset)
+	}
+	return attrs
+}
+
 // hashHostnameForLog returns a short, non-reversible correlation token for
 // a hostname. It is safe to log: the original hostname cannot be recovered
 // from it, while occurrences of the same hostname remain recognizable
@@ -730,10 +763,13 @@ func (s *SupportService) RefreshDeviceBinding(ctx context.Context, in ServiceRef
 			if category == "not_found" {
 				level = slog.LevelInfo
 			}
-			s.log.Log(ctx, level, "support: device refresh tactical lookup did not resolve",
+			attrs := []any{
 				"tenant", in.TenantID, "bindingId", existing.ID, "hostname", hashHostnameForLog(normHost),
 				"operation", "refresh_device_binding", "integration", "tactical",
-				"category", category, "httpStatus", statusCode)
+				"category", category, "httpStatus", statusCode,
+			}
+			attrs = append(attrs, tacticalDecodeDetails(tacErr)...)
+			s.log.Log(ctx, level, "support: device refresh tactical lookup did not resolve", attrs...)
 		}
 	}
 	if s.glpi != nil {

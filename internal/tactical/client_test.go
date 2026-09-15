@@ -2,6 +2,7 @@ package tactical
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -512,5 +513,207 @@ func TestPublicOperationsAreReadOnlyGETs(t *testing.T) {
 	want := []string{"GET /agents/", "GET /agents/agent-1/", "GET /agents/"}
 	if strings.Join(methods, "|") != strings.Join(want, "|") {
 		t.Fatalf("methods = %v, want %v", methods, want)
+	}
+}
+
+// TestFlexibleLocalIPs covers T-007 7.4-R3: local_ips has been observed in
+// the wild as a JSON string (single address, or several comma-separated
+// with a trailing space) in addition to the documented JSON array of
+// strings. All addresses below are from documentation/reserved ranges
+// (RFC 5737 TEST-NET-1/3, RFC 3849 documentation IPv6) — never real
+// captured data.
+func TestFlexibleLocalIPs(t *testing.T) {
+	tests := []struct {
+		name        string
+		json        string
+		want        []string
+		wantInvalid bool
+	}{
+		{"single_ipv4_string", `"192.0.2.10"`, []string{"192.0.2.10"}, false},
+		{"single_ipv6_string", `"2001:db8::1"`, []string{"2001:db8::1"}, false},
+		{"string_with_surrounding_spaces", `"  192.0.2.10  "`, []string{"192.0.2.10"}, false},
+		{"empty_string", `""`, nil, false},
+		{"null", `null`, nil, false},
+		{"array_single", `["192.0.2.10"]`, []string{"192.0.2.10"}, false},
+		{"array_multiple", `["192.0.2.10","192.0.2.11"]`, []string{"192.0.2.10", "192.0.2.11"}, false},
+		{"comma_separated_with_space", `"192.0.2.10, 192.0.2.11"`, []string{"192.0.2.10", "192.0.2.11"}, false},
+		{"comma_separated_no_space", `"192.0.2.10,192.0.2.11"`, []string{"192.0.2.10", "192.0.2.11"}, false},
+		{"type_number", `42`, nil, true},
+		{"type_boolean", `true`, nil, true},
+		{"type_object", `{"a":1}`, nil, true},
+		{"array_with_non_string_element", `["192.0.2.10", 5]`, nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var f flexibleLocalIPs
+			if err := json.Unmarshal([]byte(tc.json), &f); err != nil {
+				t.Fatalf("UnmarshalJSON must never error, got: %v", err)
+			}
+			if f.Invalid != tc.wantInvalid {
+				t.Fatalf("Invalid = %v, want %v", f.Invalid, tc.wantInvalid)
+			}
+			if len(f.Values) != len(tc.want) {
+				t.Fatalf("Values = %v, want %v", f.Values, tc.want)
+			}
+			for i := range tc.want {
+				if f.Values[i] != tc.want[i] {
+					t.Fatalf("Values = %v, want %v", f.Values, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestListAgentsSyntheticRealSchemaToleratesStringLocalIPs uses a fixture
+// with the same field names and JSON types observed in the live
+// homologation tenant on 2026-09-15 (T-007 7.4-R3) — including local_ips as
+// a plain string and as a comma-separated string — but entirely synthetic
+// hostnames/addresses (RFC 5737 TEST-NET-3), never real captured data. It
+// proves the full ListAgents/FindAgentByHostname pipeline no longer aborts
+// the whole tenant over local_ips's shape, and that a genuinely
+// uninterpretable local_ips (wrong JSON type) still doesn't take down the
+// agent it belongs to or any other agent.
+func TestListAgentsSyntheticRealSchemaToleratesStringLocalIPs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[
+			{"agent_id":"synth-1","hostname":"SYNTH-HOST-01","client_name":"Synthetic Client",
+			 "site_name":"Synthetic Site","status":"online","last_seen":"2026-09-15T12:00:00Z",
+			 "monitoring_type":"server","operating_system":"Windows 11","logged_username":"synth-user",
+			 "local_ips":"203.0.113.10","serial_number":"SYNTH-SN-1","needs_reboot":false,"maintenance_mode":false},
+			{"agent_id":"synth-2","hostname":"SYNTH-HOST-02","client_name":"Synthetic Client",
+			 "site_name":"Synthetic Site","status":"online","last_seen":"2026-09-15T12:05:00Z",
+			 "monitoring_type":"workstation","operating_system":"Windows 10","logged_username":"synth-user-2",
+			 "local_ips":"203.0.113.11, 203.0.113.12","serial_number":"SYNTH-SN-2","needs_reboot":true,"maintenance_mode":false},
+			{"agent_id":"synth-3","hostname":"SYNTH-HOST-03","client_name":"Synthetic Client",
+			 "site_name":"Synthetic Site","status":"offline","last_seen":"2026-09-15T11:00:00Z",
+			 "monitoring_type":"server","operating_system":"Linux","logged_username":"",
+			 "local_ips":["203.0.113.13"],"serial_number":"SYNTH-SN-3","needs_reboot":false,"maintenance_mode":true},
+			{"agent_id":"synth-4","hostname":"SYNTH-HOST-04","client_name":"Synthetic Client",
+			 "site_name":"Synthetic Site","status":"online","last_seen":"2026-09-15T12:10:00Z",
+			 "monitoring_type":"server","operating_system":"Windows 11","logged_username":"synth-user-4",
+			 "local_ips":0,"serial_number":"SYNTH-SN-4","needs_reboot":false,"maintenance_mode":false}
+		]`)
+	}))
+	defer server.Close()
+	client := mustClient(t, testConfig(server.URL))
+
+	agents, err := client.ListAgents(context.Background())
+	if err != nil {
+		t.Fatalf("expected ListAgents to tolerate mixed local_ips shapes, got err: %v", err)
+	}
+	if len(agents) != 4 {
+		t.Fatalf("expected 4 agents, got %d", len(agents))
+	}
+
+	byID := map[string]Agent{}
+	for _, a := range agents {
+		byID[a.AgentID] = a
+	}
+
+	single := byID["synth-1"]
+	if !single.LocalIPsValid || len(single.LocalIPs) != 1 || single.LocalIPs[0] != "203.0.113.10" {
+		t.Fatalf("synth-1: expected single valid address, got %+v", single)
+	}
+
+	commaSep := byID["synth-2"]
+	if !commaSep.LocalIPsValid || len(commaSep.LocalIPs) != 2 ||
+		commaSep.LocalIPs[0] != "203.0.113.11" || commaSep.LocalIPs[1] != "203.0.113.12" {
+		t.Fatalf("synth-2: expected two trimmed addresses, got %+v", commaSep)
+	}
+	if commaSep.AgentID != "synth-2" || commaSep.Hostname != "SYNTH-HOST-02" || commaSep.Status != "online" {
+		t.Fatalf("synth-2: agent identity/status corrupted, got %+v", commaSep)
+	}
+
+	arrayShape := byID["synth-3"]
+	if !arrayShape.LocalIPsValid || len(arrayShape.LocalIPs) != 1 || arrayShape.LocalIPs[0] != "203.0.113.13" {
+		t.Fatalf("synth-3: expected array-shaped address preserved, got %+v", arrayShape)
+	}
+
+	invalidType := byID["synth-4"]
+	if invalidType.LocalIPsValid {
+		t.Fatalf("synth-4: expected LocalIPsValid=false for a number-typed local_ips, got true")
+	}
+	if len(invalidType.LocalIPs) != 0 {
+		t.Fatalf("synth-4: expected empty LocalIPs for invalid shape, got %+v", invalidType.LocalIPs)
+	}
+	if invalidType.AgentID != "synth-4" || invalidType.Hostname != "SYNTH-HOST-04" || invalidType.Status != "online" {
+		t.Fatalf("synth-4: agent identity/status must survive an invalid local_ips, got %+v", invalidType)
+	}
+
+	// The specific defect this closes: FindAgentByHostname for ANY hostname
+	// in the tenant used to fail once any agent had an incompatible
+	// local_ips shape, because the single json.Unmarshal([]listAgentDTO)
+	// call aborted for the whole array.
+	found, err := client.FindAgentByHostname(context.Background(), "SYNTH-HOST-02")
+	if err != nil {
+		t.Fatalf("FindAgentByHostname must succeed despite another agent's incompatible local_ips, got: %v", err)
+	}
+	if found.AgentID != "synth-2" {
+		t.Fatalf("expected synth-2 located, got %+v", found)
+	}
+}
+
+// TestDecodeErrorPreservesStructuralDetailForTypeMismatch covers T-007
+// 7.4-R3 point 3: any remaining *json.UnmarshalTypeError (on a field other
+// than local_ips, which is now tolerant) must no longer be fully discarded
+// — only safe, schema-shaped detail is kept, never a value.
+func TestDecodeErrorPreservesStructuralDetailForTypeMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// needs_reboot is a bool in listAgentDTO; sent as a string here.
+		fmt.Fprint(w, `[{"agent_id":"a1","hostname":"HOST-01","needs_reboot":"yes"}]`)
+	}))
+	defer server.Close()
+	client := mustClient(t, testConfig(server.URL))
+
+	_, err := client.ListAgents(context.Background())
+	if !errors.Is(err, ErrBadResponse) {
+		t.Fatalf("expected ErrBadResponse, got %v", err)
+	}
+	var tacErr *Error
+	if !errors.As(err, &tacErr) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if tacErr.DecodeField != "needs_reboot" {
+		t.Fatalf("DecodeField = %q, want %q", tacErr.DecodeField, "needs_reboot")
+	}
+	if tacErr.DecodeGoType != "bool" {
+		t.Fatalf("DecodeGoType = %q, want %q", tacErr.DecodeGoType, "bool")
+	}
+	if tacErr.DecodeJSONType != "string" {
+		t.Fatalf("DecodeJSONType = %q, want %q", tacErr.DecodeJSONType, "string")
+	}
+	if tacErr.DecodeOffset == 0 {
+		t.Fatalf("expected non-zero DecodeOffset")
+	}
+	// Never leaks the offending value itself.
+	if strings.Contains(err.Error(), "yes") {
+		t.Fatalf("error leaked the offending value: %v", err)
+	}
+}
+
+// TestDecodeErrorPreservesOffsetForSyntaxError covers T-007 7.4-R3 point 3
+// for *json.SyntaxError: only the category and offset are kept, never a
+// body fragment, and the UnmarshalTypeError-specific fields stay empty.
+func TestDecodeErrorPreservesOffsetForSyntaxError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"agent_id":`) // truncated / invalid syntax
+	}))
+	defer server.Close()
+	client := mustClient(t, testConfig(server.URL))
+
+	_, err := client.ListAgents(context.Background())
+	if !errors.Is(err, ErrBadResponse) {
+		t.Fatalf("expected ErrBadResponse, got %v", err)
+	}
+	var tacErr *Error
+	if !errors.As(err, &tacErr) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if tacErr.DecodeOffset == 0 {
+		t.Fatalf("expected non-zero DecodeOffset for a syntax error")
+	}
+	if tacErr.DecodeField != "" || tacErr.DecodeGoType != "" || tacErr.DecodeJSONType != "" {
+		t.Fatalf("expected type-error fields empty for a syntax error, got field=%q goType=%q jsonType=%q",
+			tacErr.DecodeField, tacErr.DecodeGoType, tacErr.DecodeJSONType)
 	}
 }

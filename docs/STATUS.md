@@ -3,11 +3,12 @@
 Atualizado em: 2026-09-15
 Fase atual: Fase 1 — MVP GLPI + Tactical
 Tarefa atual: `T-007` — Etapas 7.1–7.3 concluídas e publicadas. Etapa 7.4
-(Homologação Real Controlada) em andamento: Gates 1–4 executados; correção
-7.4-R1 publicada (`a014e58`, CI verde). Uma tentativa de refresh pós-7.4-R1
-não resolveu o Tactical; correção 7.4-R2 (observabilidade sanitizada +
-hardening de resiliência) implementada, commit local, **não publicada**.
-Gate 5 não iniciado.
+(Homologação Real Controlada): Gates 1–4 executados; GLPI aprovado (ticket
+#4, aberto, intocado). Tactical ainda não aprovado após duas correções
+publicadas (7.4-R1 `a014e58`, 7.4-R2 `162e8cf`) e uma terceira, 7.4-R3,
+implementada agora com a causa raiz comprovada e corrigida (`local_ips`:
+string vs. `[]string`) — commit local, **não publicada**. Gate 5 não
+iniciado.
 
 ## Status das Etapas da T-007
 
@@ -17,93 +18,62 @@ Gate 5 não iniciado.
   travamento de CI, timeouts escalonados e teste de teardown descritos em
   `docs/tasks/T-007-HOMOLOGACAO-HARDENING-DEPLOY.md`. Matriz E2E 12/12 (ver
   seção abaixo).
-- **7.4 (Homologação Real Controlada):** Em andamento no ambiente pessoal de
-  Ricardo, dados sintéticos, chamado `[HOMOLOGAÇÃO T-007] Validação
-  controlada RicardoSMS`.
-  - **Gate 1 (Preflight read-only):** Aprovado. GLPI e Tactical de
-    laboratório autenticados; ativo `RicardoSMS` localizado em ambos.
-  - **Gate 2A (Pareamento WhatsApp):** Aprovado.
-  - **Gate 2B (Mensagem controlada):** Aprovado **com ressalva D-2B-01**
-    (uma mensagem manual adicional enviada pelo próprio Ricardo; não foi
-    duplicidade do sistema; zero chamados GLPI nesta fase).
-  - **Gate 3 (Integrações read-only):** Aprovado no escopo read-only.
-  - **Gate 4 (Criação do chamado):** **GLPI aprovado** — ticket real **#4**
-    criado (`external_id` formato canônico `wacalls-` + 32 hex; 1 POST
-    local, 1 POST externo, sem retry; `attempt_count=1`; estado `synced`;
-    `glpi_computer_id=59` confirmado em `device_bindings`,
-    `support_requests` e no texto do próprio ticket via `run-gate4.ps1`).
-    O ticket #4 permanece aberto e não deve ser alterado/fechado.
-    **Tactical reprovado**: `device_bindings` ficou com
-    `match_status=missing_tactical` e `tactical_agent_id` vazio.
-  - **Causa comprovada (código, sem ambiguidade):** `SupportService`
-    descartava o `tactical.Agent` retornado por `FindAgentByHostname`
-    (`_, tacErr := ...`) antes de persistir `tactical_agent_id` — mesmo
-    num lookup bem-sucedido o campo nunca seria preenchido.
-  - **Causa de `match_status=missing_tactical` em si:** exige que
-    `FindAgentByHostname` tenha retornado erro nessa chamada (confirmado
-    pela lógica determinística do switch e pelo estado do banco). **Qual
-    erro exato — não comprovado.** `server.stdout.log`/`server.stderr.log`
-    não mencionam Tactical/last_seen/RicardoSMS nesse período e o pacote
-    `tactical` não tinha logger antes desta correção. A alegação original
-    de que a API retornou `last_seen` no formato `MM/DD/YYYY HH:mm:ss`
-    (ex. `09/14/2026 22:58:35`) **não tem evidência bruta sobrevivente**.
-    Duas consultas reais ao Tactical em 2026-09-15 mostraram 100% RFC3339
-    com `Z` em 29/29 agentes, incluindo `RicardoSMS`. Uma reprodução
-    controlada mostrou que converter esse valor real para `[datetime]` no
-    PowerShell e exibi-lo com `ToString()` padrão nesta máquina produz
-    exatamente uma string `MM/dd/yyyy HH:mm:ss` em horário local — a mesma
-    forma relatada antes — consistente com artefato de apresentação do
-    PowerShell, não com conteúdo bruto da API, mas isso **não pode ser
-    confirmado retroativamente com certeza absoluta**.
-  - **Correção 7.4-R1 (publicada — commit `a014e58dedcd91acb7f509a99ea67a726342820b`,
-    `origin/main`, GitHub Actions "E2E Support Suite" verde):**
-    - **Causa comprovada, corrigida:** `SupportService` agora captura e
-      persiste `tactical_agent_id` a partir do `Agent` de
-      `FindAgentByHostname`.
-    - **Hardening preventivo** (defeito real, confirmado por inspeção de
-      código e testável isoladamente; ligação com o incidente específico
-      do Gate 4 permanece não comprovada — ver acima e D-022):
-      `parseLastSeen` aceita RFC3339 (com/sem offset/frações — já
-      funcionava), vazio/null e espaços sem nunca falhar; formato legado
-      é reconhecido mas não confiado (`LastSeenValid=false`, hora zero);
-      `ListAgents` não aborta mais a lista inteira por um agente
-      malformado (esse defeito, se tivesse ocorrido no Gate 4, derrubaria
-      `FindAgentByHostname` para **qualquer** hostname do tenant).
-    - Aviso sanitizado (sem valor bruto) quando `LastSeenValid=false`.
-    - Novo endpoint administrativo `POST /api/support/devices/{id}/refresh`
-      (somente admin, tenant-scoped, somente leituras remotas, idempotente,
-      nunca cria segundo binding, preserva IDs válidos em falha parcial,
-      usa exclusivamente o hostname já persistido) para corrigir bindings
-      existentes sem SQL direto e sem novo ticket.
-    - Testes novos/reescritos em `internal/tactical/client_test.go`,
-      `cmd/server/supportservice_test.go` e `cmd/server/supportapi_test.go`.
-    - Validação: `gofmt`, `go vet ./...`, `go build ./...`,
-      `go test -count=1 ./...` (100% verde), `npm test` (21/21),
-      `npm run build`, `npm run test:e2e` (12/12) — todos aprovados.
-  - **Tentativa de refresh pós-7.4-R1 (2026-09-15):** 1 chamada
-    `POST /api/support/devices/{id}/refresh` no binding `RicardoSMS`
-    existente (ticket #4 intocado). Resultado: `match_status` permaneceu
-    `missing_tactical`. Segundos depois, checagem read-only direta ao
-    Tactical encontrou `RicardoSMS` presente e válido — inconsistente com
-    falha persistente, mas **causa exata não reconstituível**:
-    `RefreshDeviceBinding` descartava o erro de `FindAgentByHostname` sem
-    log algum (not-found, auth, rate-limit, timeout e 5xx eram todos
-    silenciosos e indistinguíveis). Sem retry; estado preservado.
-  - **Correção 7.4-R2 (implementada, commit local, NÃO publicada; refresh
-    real NÃO repetido; ticket #4 intocado):** fecha exatamente essa lacuna
-    de observabilidade — ver **D-023** para o desenho completo. Resumo:
-    `internal/tactical` ganha `ErrTimeout`/`ErrCanceled` tipados; `cmd/server`
-    ganha log sanitizado por categoria (nunca URL/header/corpo/API key,
-    hostname só como hash) em toda falha do Tactical, com not-found (`INFO`)
-    diferenciado de falha real (`WARN`); um agente encontrado mas com
-    `agent_id` vazio na resposta deixa de virar `matched` incorretamente.
-    Resiliência existente preservada e testada: falha do Tactical nunca
-    apaga `glpi_computer_id`; `RefreshDeviceBinding` nunca cria ticket.
-    Validação: `gofmt`, `go vet ./...`, `go build ./...`,
-    `go test -count=1 ./...` (100% verde), `npm test` (21/21 — 1 flake
-    pré-existente de `runner-timeout.test.mjs`, não relacionado, confirmado
-    ao isolar), `npm run build`, `npm run test:e2e` (12/12),
-    `git diff --check` — todos aprovados.
+- **7.4 (Homologação Real Controlada):** ambiente pessoal de Ricardo, dados
+  sintéticos, ticket `[HOMOLOGAÇÃO T-007] Validação controlada RicardoSMS`.
+  - **Gates 1–3:** Aprovados (preflight read-only; pareamento WhatsApp;
+    mensagem controlada com ressalva D-2B-01; integrações read-only).
+  - **Gate 4 GLPI:** Aprovado — ticket real **#4** criado (`external_id`
+    canônico, `glpi_computer_id=59` confirmado em `device_bindings` e no
+    texto do ticket). Permanece aberto; **nunca alterado desde a criação**,
+    em nenhuma das tentativas abaixo.
+  - **Gate 4 Tactical — histórico de tentativas (ainda não aprovado):**
+    1. **Tentativa original:** `missing_tactical`. Causa comprovada por
+       código: `SupportService` descartava o `tactical.Agent` retornado
+       por `FindAgentByHostname` sem persistir `tactical_agent_id`.
+    2. **7.4-R1** (publicado — commit `a014e58dedcd91acb7f509a99ea67a726342820b`,
+       `origin/main`, CI "E2E Support Suite" verde): corrige o descarte
+       acima; hardening de `parseLastSeen` para formato legado do Tactical
+       (D-022, causa daquele formato nunca confirmada). Refresh seguinte:
+       ainda `missing_tactical`, **zero log** explicando por quê —
+       `RefreshDeviceBinding` descartava qualquer erro do Tactical sem
+       registrar nada.
+    3. **7.4-R2** (publicado — commit `162e8cfc55df4ee7ba711e4459b4a9ef4c02fb7c`,
+       `origin/main`, CI verde; D-023): observabilidade sanitizada —
+       categorias tipadas (`ErrTimeout`/`ErrCanceled` novos), log por
+       categoria + status HTTP, hostname só como hash, not-found (`INFO`)
+       diferenciado de falha real (`WARN`). Refresh seguinte revelou
+       `category=parse_error`, mas o erro Go original ainda era descartado
+       ao virar `ErrBadResponse`, sem detalhe estrutural.
+    4. **Diagnóstico offline (2026-09-15, sem alterar código):**
+       reprodução local do decode contra o corpo real capturado confirmou
+       `*json.UnmarshalTypeError` em `local_ips`: a API do Tactical retorna
+       `local_ips` como **string** (endereço único, ou vários separados
+       por vírgula + espaço — confirmado em 29/29 agentes reais: 26
+       únicos, 3 com vírgula, 0 arrays, 0 outros formatos) enquanto
+       `listAgentDTO.LocalIPs` esperava `[]string`. `json.Unmarshal`
+       abortava o array inteiro — **qualquer** hostname do tenant ficaria
+       `missing_tactical`, não só RicardoSMS; não é falha de rede
+       transitória, é 100% reprodutível enquanto a API responder nesse
+       formato.
+    5. **7.4-R3** (implementada, commit local, **NÃO publicada**; refresh
+       real **NÃO repetido**): corrige a causa raiz — ver **D-024**.
+       `flexibleLocalIPs` aceita string única, string separada por vírgula
+       (com `TrimSpace`), array de strings, `null` e string vazia; um tipo
+       verdadeiramente incompatível (number/boolean/object/elemento não-
+       string em array) marca só aquele campo como inválido
+       (`LocalIPsValid=false`) sem abortar o agente nem os demais. Erros de
+       decode remanescentes (`*json.UnmarshalTypeError`/`*json.SyntaxError`
+       em qualquer outro campo) agora preservam campo/tipo Go/tipo
+       JSON/offset sanitizados em vez de serem descartados por completo.
+       Testes cobrem os 12 formatos pedidos (IPv4/IPv6/espaços/vazio/null/
+       array único/array múltiplo/vírgula/number/boolean/object/elemento
+       inválido em array) mais um teste de ponta a ponta com
+       `tactical.Client` real (não mock) contra fixture com o schema real
+       (dados sintéticos, RFC 5737), provando `missing_tactical → matched`
+       com `glpi_computer_id=59` preservado. Validação: `gofmt`,
+       `go vet ./...`, `go build ./...`, `go test -count=1 ./...` (100%
+       verde), `npm test` (21/21), `npm run build`, `npm run test:e2e`
+       (12/12), `git diff --check` — todos aprovados.
   - **Gate 5:** **NÃO iniciado.**
 
 ## Matriz E2E (12/12, todos com assertion real no navegador)
@@ -140,16 +110,25 @@ Gate 5 não iniciado.
   (categoria + status HTTP, hostname só como hash) para toda falha de
   `FindAgentByHostname`, antes descartada sem log. Detalhe completo em
   `docs/DECISIONS.md`.
+- **D-024:** Parser tolerante para `local_ips` do Tactical (T-007 7.4-R3):
+  aceita string única, string separada por vírgula, array de strings, null
+  e string vazia; tipo verdadeiramente incompatível marca só o campo como
+  inválido, nunca aborta o agente. Causa raiz do `missing_tactical`
+  observado em duas tentativas reais de refresh. Detalhe completo em
+  `docs/DECISIONS.md`.
 
 ## Bloqueios e Próximos Passos Obrigatórios
 
 1. **Próxima Ação:** Autorização para push do commit local de correção
-   7.4-R2 (observabilidade sanitizada do Tactical).
+   7.4-R3 (parser tolerante de `local_ips` + preservação sanitizada de
+   erro de decode).
 2. Após o push, autorizar **uma** nova chamada controlada a
    `POST /api/support/devices/{id}/refresh` no binding `RicardoSMS`
-   existente (ticket #4 intocado, sem chamado novo). Se ainda falhar, o log
-   sanitizado agora identifica a categoria real (not_found/auth/
-   rate_limited/timeout/unavailable/parse_error/etc.) e o status HTTP.
+   existente (ticket #4 intocado, sem chamado novo). Com a causa raiz
+   corrigida, o resultado esperado é `match_status=matched`; se ainda
+   falhar, o log sanitizado (7.4-R2) identifica categoria e status HTTP,
+   e agora também campo/tipo Go/tipo JSON/offset quando for outro
+   problema de decode (7.4-R3).
 3. Confirmar timezone real do formato legado do Tactical caso ele volte a
    ocorrer, antes de tratá-lo como confiável.
 4. Após confirmação da Tactical em homologação real, avançar para o Gate 5.
@@ -159,9 +138,9 @@ Gate 5 não iniciado.
 ## Estado Git
 
 - Branch: `main`.
-- `origin/main` == `HEAD` em `a014e58dedcd91acb7f509a99ea67a726342820b`
-  (7.4-R1, publicado, CI "E2E Support Suite" verde).
-- Commit local pendente de push: correção 7.4-R2 (observabilidade
-  sanitizada de erros do Tactical — `ErrTimeout`/`ErrCanceled` tipados,
-  categorização sem dados sensíveis, `agent_id` vazio não vira `matched`).
+- `origin/main` == `HEAD` em `162e8cfc55df4ee7ba711e4459b4a9ef4c02fb7c`
+  (7.4-R2, publicado, CI "E2E Support Suite" verde).
+- Commit local pendente de push: correção 7.4-R3 (`flexibleLocalIPs`
+  tolerante a string/array/vírgula/null; preservação sanitizada de
+  `*json.UnmarshalTypeError`/`*json.SyntaxError` em `tactical.Error`).
 - Push: Não realizado.

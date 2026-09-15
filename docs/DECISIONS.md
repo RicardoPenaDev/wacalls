@@ -370,6 +370,73 @@ para diagnóstico); testes cobrem log sanitizado sem hostname cru,
 diferenciação not-found vs. falha real, e `agent_id` vazio não virando
 `matched` (`cmd/server/supportservice_test.go`).
 
+## D-024 — Parser tolerante para local_ips do Tactical e preservação sanitizada de erro de decode (T-007 7.4-R3)
+
+Data: 2026-09-15 · Status: aceita
+
+Decisão: `internal/tactical/client.go` definia `listAgentDTO.LocalIPs` e
+`detailAgentDTO.LocalIPs` como `[]string`. Uma reprodução offline do decode
+contra o corpo real capturado da API do Tactical no tenant de homologação
+(29 agentes, 2026-09-15) confirmou `*json.UnmarshalTypeError` em
+`local_ips`: a API retorna esse campo como **string** — 26 dos 29 agentes
+com um único endereço, 3 com dois endereços separados por vírgula e um
+espaço (ex. `"10.0.0.4, 10.0.0.5"`), 0 arrays, 0 strings vazias, 0
+separados por ponto e vírgula, 0 serializados como JSON aninhado — nunca
+`[]string`. Como `ListAgents`/`GetAgent` decodificam o array inteiro numa
+única chamada `json.Unmarshal`, esse único campo incompatível abortava a
+lista completa, derrubando `FindAgentByHostname` para **qualquer**
+hostname do tenant — a causa raiz comprovada por trás de duas tentativas
+reais de refresh (`match_status` permanecendo `missing_tactical` mesmo com
+o agente presente e válido no Tactical) e, muito provavelmente, do
+incidente original do Gate 4 também (não confirmável retroativamente —
+nenhum corpo daquele momento sobreviveu).
+Corrigido em duas partes: (1) novo tipo interno `flexibleLocalIPs` com
+`UnmarshalJSON` próprio, usado no lugar de `[]string` nos dois DTOs — nunca
+retorna erro. Aceita string única (um elemento), string separada por
+vírgula (`strings.Split` + `TrimSpace` em cada parte — nunca por espaço,
+confirmado como não sendo o separador real), array de strings, `null` e
+string vazia (lista vazia); qualquer outro formato (number, boolean,
+object, ou um array contendo um elemento não-string) produz lista vazia e
+marca o campo como inválido (`Agent.LocalIPsValid=false`, espelhando
+`LastSeenValid`) sem abortar o agente — `AgentID`, `Hostname`, `Status` e
+os demais campos permanecem íntegros, e nenhum outro agente do array é
+afetado. (2) `ListAgents`/`GetAgent` não descartam mais por completo um
+erro de decode remanescente (qualquer outro campo, futuro ou não previsto
+aqui): `decodeError` reconhece `*json.UnmarshalTypeError` (preserva
+`Field`, o tipo Go esperado, o tipo JSON recebido — uma palavra genérica
+como "string"/"number"/"bool"/"array"/"object", nunca o valor — e o
+offset) e `*json.SyntaxError` (preserva só o offset), gravados em campos
+novos e sanitizados de `tactical.Error` (`DecodeField`, `DecodeGoType`,
+`DecodeJSONType`, `DecodeOffset`). `cmd/server` expõe isso no log
+sanitizado da 7.4-R2 (`tacticalDecodeDetails`) sem nunca incluir valor,
+corpo, URL, header ou API key.
+Motivo: um campo populado incorretamente não pode derrubar a identificação
+de um equipamento inteiro; e quando algo além de `local_ips` divergir do
+schema esperado no futuro, o erro real não pode voltar a ser descartado
+silenciosamente como aconteceu aqui — essa foi exatamente a razão de duas
+tentativas de refresh terem sido inconclusivas antes desta investigação.
+Alternativas consideradas: exigir `[]string` e apenas tolerar erro de
+decode via log (rejeitada — não resolve o problema, só o torna visível;
+`ListAgents` continuaria falhando para o tenant inteiro); normalizar
+`local_ips` no lado do servidor Tactical (fora do controle do WACalls,
+não aplicável); assumir espaço como separador adicional (rejeitada — sem
+evidência real, e endereços IPv6 usam `:`, não espaço, então não há risco
+de colisão a mitigar).
+Consequências: `ListAgents`/`FindAgentByHostname` deixam de falhar para o
+tenant inteiro por causa de um único campo com forma inesperada;
+`Agent.LocalIPs`/`LocalIPsValid` seguem o mesmo padrão já estabelecido por
+`LastSeenValid`; qualquer decode-erro remanescente em outro campo passa a
+ser diagnosticável pelo log sanitizado sem precisar de nova investigação
+offline. Testes: `internal/tactical/client_test.go`
+(`TestFlexibleLocalIPs` — 12 formatos; `TestListAgentsSyntheticRealSchemaToleratesStringLocalIPs`
+— fixture sintética com o schema real; `TestDecodeErrorPreservesStructuralDetailForTypeMismatch`;
+`TestDecodeErrorPreservesOffsetForSyntaxError`) e
+`cmd/server/supportservice_test.go`
+(`TestSupportService_RefreshDeviceBinding_RealSchemaLocalIPsEndToEnd` — único
+teste do arquivo que usa um `tactical.Client` real, não mock, provando
+`missing_tactical → matched` com `glpi_computer_id=59` preservado através
+do caminho de decode real).
+
 ## Modelo para novas decisões
 
 ```text

@@ -33,6 +33,19 @@ type Error struct {
 	StatusCode int
 	RetryAfter time.Duration
 	Field      string
+	// DecodeField, DecodeGoType, DecodeJSONType, and DecodeOffset carry only
+	// schema-shaped information about a JSON decode failure (T-007 7.4-R3):
+	// the struct field's JSON name, the Go type it expects, a generic kind
+	// word for what was actually received ("string", "number", "bool",
+	// "array", "object", "null" — encoding/json never puts the literal
+	// value here), and a byte offset. Populated only when Kind is
+	// ErrBadResponse and the underlying cause was a
+	// *json.UnmarshalTypeError or *json.SyntaxError; never the response
+	// body, a field value, headers, URL, or the API key.
+	DecodeField    string
+	DecodeGoType   string
+	DecodeJSONType string
+	DecodeOffset   int64
 }
 
 func (e *Error) Error() string {

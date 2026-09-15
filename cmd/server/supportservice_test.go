@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1297,4 +1299,78 @@ func TestSupportService_RefreshDeviceBinding_EmptyAgentIDNotMatched(t *testing.T
 	if updated.GLPIComputerID != "59" {
 		t.Fatalf("expected glpi_computer_id preserved, got %q", updated.GLPIComputerID)
 	}
+}
+
+// TestSupportService_RefreshDeviceBinding_RealSchemaLocalIPsEndToEnd covers
+// T-007 7.4-R3's actual regression surface: unlike every other Tactical
+// test in this file, it wires a real *tactical.Client (not the mock)
+// through an httptest server, so the JSON decode path that broke in
+// production actually runs. The fixture uses the exact field names/types
+// observed in the live homologation tenant on 2026-09-15 — including
+// local_ips as a comma-separated string — with entirely synthetic
+// hostnames/addresses (RFC 5737 TEST-NET-3), never real captured data.
+func TestSupportService_RefreshDeviceBinding_RealSchemaLocalIPsEndToEnd(t *testing.T) {
+	tacticalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected Tactical method: %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `[
+			{"agent_id":"synth-e2e-1","hostname":"SYNTH-E2E-HOST","client_name":"Synthetic",
+			 "site_name":"Synthetic Site","status":"online","last_seen":"2026-09-15T12:00:00Z",
+			 "monitoring_type":"server","operating_system":"Windows 11","logged_username":"synth",
+			 "local_ips":"203.0.113.20, 203.0.113.21","serial_number":"SYNTH-SN","needs_reboot":false,"maintenance_mode":false}
+		]`)
+	}))
+	defer tacticalServer.Close()
+
+	realTactical, err := tactical.New(tactical.Config{BaseURL: tacticalServer.URL, APIKey: "test-key", Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("tactical.New: %v", err)
+	}
+
+	_, store, bStore, mockG, _, _ := setupTestSupportService(t)
+	svc := NewSupportService(store, bStore, mockG, realTactical, slog.Default())
+	ctx := context.Background()
+
+	binding, err := bStore.Upsert(ctx, DeviceBinding{
+		OwnerID:        "tenant-e2e",
+		TenantID:       "tenant-e2e",
+		Hostname:       "SYNTH-E2E-HOST",
+		GLPIComputerID: "59",
+		MatchStatus:    "missing_tactical",
+	})
+	if err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	mockG.findComputerFn = func(ctx context.Context, hostname string) (glpi.Computer, error) {
+		return glpi.Computer{ID: "59", Name: hostname}, nil
+	}
+
+	updated, err := svc.RefreshDeviceBinding(ctx, ServiceRefreshDeviceInput{ID: binding.ID, TenantID: "tenant-e2e"})
+	if err != nil {
+		t.Fatalf("RefreshDeviceBinding must succeed against the real-schema fixture, got: %v", err)
+	}
+	if updated.MatchStatus != "matched" {
+		t.Fatalf("expected missing_tactical -> matched, got %q", updated.MatchStatus)
+	}
+	if updated.TacticalAgentID != "synth-e2e-1" {
+		t.Fatalf("expected tactical_agent_id populated from the real decode path, got %q", updated.TacticalAgentID)
+	}
+	if updated.GLPIComputerID != "59" {
+		t.Fatalf("expected glpi_computer_id=59 preserved, got %q", updated.GLPIComputerID)
+	}
+
+	all, err := bStore.Search(ctx, "tenant-e2e", "SYNTH-E2E-HOST")
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 binding, got %d", len(all))
+	}
+	if len(mockG.createTicketCalls) != 0 {
+		t.Fatalf("expected 0 GLPI ticket creations from refresh, got %d", len(mockG.createTicketCalls))
+	}
+	// The tactical package exposes no write/remote-action operation at all
+	// (see internal/tactical package doc comment) — there is no call this
+	// test, or RefreshDeviceBinding, could make that would mutate Tactical.
 }

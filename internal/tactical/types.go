@@ -36,6 +36,15 @@ type Agent struct {
 	LoggedUser      string
 	LastLoggedUser  string
 	LocalIPs        []string
+	// LocalIPsValid is false when the upstream local_ips value had a shape
+	// that could not be interpreted at all (T-007 7.4-R3: number, boolean,
+	// object, or an array containing a non-string element — the live
+	// homologation tenant was observed sending a JSON string instead of an
+	// array, which is tolerated, not one of these invalid shapes). LocalIPs
+	// is left empty in that case; the agent itself, AgentID, Hostname, and
+	// every other field are still returned normally. Internal-only: tagged
+	// json:"-" for the same reason as LastSeenValid.
+	LocalIPsValid   bool `json:"-"`
 	SerialNumber    string
 	NeedsReboot     bool
 	MaintenanceMode bool

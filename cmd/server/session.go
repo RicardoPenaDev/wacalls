@@ -52,17 +52,23 @@ type Session struct {
 	cloudPhoneID      string
 	cloudWABAID       string
 	cloudConfigured   bool
+	lastKnownJID      string
 }
 
 func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) *Session {
+	initJID := ""
+	if client != nil && client.Store != nil && client.Store.ID != nil {
+		initJID = client.Store.ID.String()
+	}
 	s := &Session{
-		id:     id,
-		name:   name,
-		mgr:    mgr,
-		log:    mgr.log.With("session", id),
-		client: client,
-		auth:   AuthSnapshot{State: "connecting"},
-		reg:    newCallRegistry(),
+		id:           id,
+		name:         name,
+		mgr:          mgr,
+		log:          mgr.log.With("session", id),
+		client:       client,
+		auth:         AuthSnapshot{State: "connecting"},
+		reg:          newCallRegistry(),
+		lastKnownJID: initJID,
 	}
 	client.AddEventHandler(s.handleEvent)
 	return s
@@ -276,6 +282,9 @@ func (s *Session) handleEvent(rawEvt any) {
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
 		if id := s.client.Store.ID; id != nil {
+			s.mu.Lock()
+			s.lastKnownJID = id.String()
+			s.mu.Unlock()
 			_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
 		}
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
@@ -293,6 +302,8 @@ func (s *Session) handleEvent(rawEvt any) {
 		if s.mgr != nil && s.mgr.store != nil {
 			_ = s.mgr.store.setWelcomeSent(s.mgr.appCtx, s.id, false)
 		}
+	case *events.TemporaryBan, *events.StreamReplaced:
+		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
 	case *events.CallAccept:
@@ -383,9 +394,17 @@ func (s *Session) startPairing(ctx context.Context) error {
 func (s *Session) setAuth(a AuthSnapshot) {
 	s.mu.Lock()
 	s.auth = a
+	jid := s.lastKnownJID
+	if s.client != nil && s.client.Store != nil && s.client.Store.ID != nil {
+		jid = s.client.Store.ID.String()
+		s.lastKnownJID = jid
+	}
 	s.mu.Unlock()
 	s.mgr.broker.emitAuthState(s.id, a)
 	s.mgr.broker.emitSessionList(s.mgr.infos())
+	if s.mgr != nil && s.mgr.OnSessionStateChange != nil {
+		s.mgr.OnSessionStateChange(s, a.State, jid)
+	}
 }
 
 func (s *Session) info() SessionInfo {

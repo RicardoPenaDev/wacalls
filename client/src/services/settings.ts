@@ -221,3 +221,28 @@ export const saveGoogleOAuth = (cfg: GoogleOAuthUpdate) =>
     method: "PUT",
     body: JSON.stringify(cfg),
   });
+
+/* ------------- Evolution API Alerts ------------- */
+
+export type EvolutionAlertConfig = {
+  enabled: boolean;
+  apiUrl: string;
+  apiKey: string;
+  instanceName: string;
+  destination: string;
+};
+
+export const getEvolutionAlert = () =>
+  req<EvolutionAlertConfig>("/api/settings/evolution-alert");
+
+export const saveEvolutionAlert = (cfg: EvolutionAlertConfig) =>
+  req<EvolutionAlertConfig>("/api/settings/evolution-alert", {
+    method: "PUT",
+    body: JSON.stringify(cfg),
+  });
+
+export const testEvolutionAlert = (cfg?: Partial<EvolutionAlertConfig>) =>
+  req<{ ok: boolean; message: string }>("/api/settings/evolution-alert/test", {
+    method: "POST",
+    body: cfg ? JSON.stringify(cfg) : undefined,
+  });

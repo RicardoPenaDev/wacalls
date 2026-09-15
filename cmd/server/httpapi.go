@@ -61,6 +61,7 @@ func (s *server) routes() http.Handler {
 	s.registerBusinessHoursRoutes(mux)
 	s.registerContactsRoutes(mux)
 	s.registerSettingsRoutes(mux)
+	s.registerEvolutionAlertRoutes(mux)
 
 	s.registerBillingRoutes(mux)
 	s.registerFreeTierRoutes(mux)

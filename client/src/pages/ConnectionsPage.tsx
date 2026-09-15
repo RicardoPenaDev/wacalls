@@ -7,17 +7,21 @@ import {
   Phone,
   Plus,
   RefreshCw,
+  Search,
   Settings2,
   Smartphone,
   Trash2,
   Wifi,
   WifiOff,
   WrenchIcon,
+  X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EvolutionAlertCard } from "@/components/domain/session/EvolutionAlertCard";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { CreateConnectionModal } from "@/components/domain/session/CreateConnectionModal";
 import { EditConnectionModal } from "@/components/domain/session/EditConnectionModal";
@@ -262,6 +266,25 @@ export const ConnectionsPage = () => {
   const [payFor, setPayFor] = useState<SessionInfo | null>(null);
   const [editFor, setEditFor] = useState<SessionInfo | null>(null);
 
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "connected" | "disconnected">("all");
+
+  const connectedCount = sessions.filter((s) => s.paired && s.state === "open").length;
+  const disconnectedCount = sessions.length - connectedCount;
+
+  const filteredSessions = sessions.filter((s) => {
+    const isConnected = s.paired && s.state === "open";
+    if (statusFilter === "connected" && !isConnected) return false;
+    if (statusFilter === "disconnected" && isConnected) return false;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      const nameMatch = s.name ? s.name.toLowerCase().includes(q) : false;
+      const jidMatch = s.jid ? s.jid.toLowerCase().includes(q) : false;
+      return nameMatch || jidMatch;
+    }
+    return true;
+  });
+
   useEffect(() => {
     ensureSessionsWired();
   }, []);
@@ -269,8 +292,6 @@ export const ConnectionsPage = () => {
   return (
     <AppShell>
       <div className="space-y-5 pb-12">
-
-
         {/* Header */}
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
@@ -281,6 +302,90 @@ export const ConnectionsPage = () => {
             <Plus className="h-4 w-4" /> {t("pages.connections.newInstance")}
           </Button>
         </div>
+
+        {/* Evolution API Notification Card */}
+        <EvolutionAlertCard />
+
+        {/* Filters & Search bar */}
+        {sessions.length > 0 && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+            {/* Status pills */}
+            <div className="flex flex-wrap items-center gap-1.5 rounded-lg border bg-muted/30 p-1">
+              <button
+                type="button"
+                onClick={() => setStatusFilter("all")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                  statusFilter === "all"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Todos
+                <span
+                  className={`ml-0.5 rounded-full px-1.5 py-0.2 text-[10px] ${
+                    statusFilter === "all" ? "bg-muted font-bold text-foreground" : "bg-muted/70 text-muted-foreground"
+                  }`}
+                >
+                  {sessions.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setStatusFilter("connected")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                  statusFilter === "connected"
+                    ? "bg-background text-emerald-500 shadow-sm font-semibold"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                Conectados
+                <span className="ml-0.5 rounded-full bg-emerald-500/15 px-1.5 py-0.2 text-[10px] text-emerald-500 font-bold">
+                  {connectedCount}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setStatusFilter("disconnected")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                  statusFilter === "disconnected"
+                    ? "bg-background text-rose-400 shadow-sm font-semibold"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full bg-muted-foreground/50" />
+                Desconectados
+                <span className="ml-0.5 rounded-full bg-muted px-1.5 py-0.2 text-[10px] text-muted-foreground font-bold">
+                  {disconnectedCount}
+                </span>
+              </button>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative w-full sm:w-64">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Buscar por nome ou número..."
+                className="h-8 pl-8 pr-8 text-xs"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  aria-label="Limpar busca"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {sessions.length === 0 ? (
           <div className="grid place-items-center rounded-xl border border-dashed bg-card/40 p-12 text-center">
@@ -293,9 +398,28 @@ export const ConnectionsPage = () => {
               <Plus className="h-4 w-4" /> {t("pages.connections.newInstance")}
             </Button>
           </div>
+        ) : filteredSessions.length === 0 ? (
+          <div className="grid place-items-center rounded-xl border border-dashed bg-card/40 p-10 text-center">
+            <WifiOff className="h-8 w-8 text-muted-foreground" />
+            <div className="mt-2 text-sm font-medium">Nenhuma conexão encontrada</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Nenhuma conexão corresponde aos filtros aplicados.
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              onClick={() => {
+                setStatusFilter("all");
+                setSearchQuery("");
+              }}
+            >
+              Limpar filtros
+            </Button>
+          </div>
         ) : (
           <div className="space-y-3">
-            {sessions.map((s) => (
+            {filteredSessions.map((s) => (
               <InstanceRow
                 key={s.id}
                 s={s}

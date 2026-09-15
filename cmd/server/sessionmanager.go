@@ -40,6 +40,9 @@ type SessionManager struct {
 	// non-admin operators can see.
 	UserSessionsFn func(userID string) []string
 
+	// OnSessionStateChange is triggered whenever an instance changes connection status
+	OnSessionStateChange func(s *Session, newState, jid string)
+
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	order    []string

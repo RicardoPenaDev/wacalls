@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -52,6 +53,7 @@ type server struct {
 	glpiClient     supportGLPIClient
 	tacticalClient supportTacticalClient
 	supportCfg     *supportConfig
+	alertsReady    atomic.Bool
 }
 
 func openDB(dbPath string) (*sql.DB, error) {
@@ -293,6 +295,10 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, supC
 		supportStore: sStore, supportSvc: supSvc, bindings: deviceBindings,
 		glpiClient: glpiCli, tacticalClient: tacticalCli, supportCfg: &supCfg,
 	}
+	mgr.OnSessionStateChange = srv.handleSessionStateChange
+	time.AfterFunc(20*time.Second, func() {
+		srv.alertsReady.Store(true)
+	})
 	// Pending follow-ups are dropped as soon as the customer replies.
 	onInboundMessage = func(sessionID, chatJID string) {
 		_ = schedules.CancelFollowups(ctx, sessionID, chatJID)

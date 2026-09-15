@@ -167,6 +167,18 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 			return nil, ErrInvalidHostname
 		}
 		resolvedHostInformed = strings.TrimSpace(*in.Hostname)
+		localBinding, found, err := s.bindings.FindByHostname(ctx, in.TenantID, norm)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			resolvedBindingID = &localBinding.ID
+			resolvedHostInformed = localBinding.Hostname
+			if localBinding.GLPIComputerID != "" {
+				compID := localBinding.GLPIComputerID
+				resolvedGLPICompID = &compID
+			}
+		}
 	}
 
 	// Calculate canonical payload v2 and fingerprint
@@ -248,13 +260,23 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 	}
 
 	// Equipment resolution (outside transaction)
-	if resolvedGLPICompID == nil && resolvedHostInformed != "" {
+	if (resolvedGLPICompID == nil || resolvedBindingID == nil) && resolvedHostInformed != "" {
 		normHost := normalizeHostname(resolvedHostInformed)
-		// Check local store first
-		if localBinding, found, err := s.bindings.FindByHostname(ctx, in.TenantID, normHost); err == nil && found && localBinding.GLPIComputerID != "" {
-			compID := localBinding.GLPIComputerID
-			resolvedGLPICompID = &compID
-		} else {
+		// Check local store first if binding not resolved
+		if resolvedBindingID == nil {
+			localBinding, found, err := s.bindings.FindByHostname(ctx, in.TenantID, normHost)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				resolvedBindingID = &localBinding.ID
+				if localBinding.GLPIComputerID != "" && resolvedGLPICompID == nil {
+					compID := localBinding.GLPIComputerID
+					resolvedGLPICompID = &compID
+				}
+			}
+		}
+		if resolvedGLPICompID == nil {
 			// Best-effort remote lookups
 			var foundTactical bool
 			var foundGLPI bool
@@ -305,7 +327,7 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 			matchStatus := equipmentMatchStatus(foundTactical, foundGLPI)
 
 			if foundTactical || foundGLPI {
-				_, _ = s.bindings.Upsert(ctx, DeviceBinding{
+				savedBinding, err := s.bindings.Upsert(ctx, DeviceBinding{
 					OwnerID:            in.OwnerID,
 					TenantID:           in.TenantID,
 					Hostname:           resolvedHostInformed,
@@ -315,16 +337,23 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 					MatchStatus:        matchStatus,
 					LastVerifiedAt:     s.now().UTC().Unix(),
 				})
+				if err != nil {
+					return nil, err
+				}
+				if savedBinding.ID != "" {
+					resolvedBindingID = &savedBinding.ID
+				}
 			}
 		}
 
-		if resolvedGLPICompID != nil {
+		if resolvedGLPICompID != nil || resolvedBindingID != nil {
 			enrichErr := s.store.EnrichSnapshot(ctx, EnrichSnapshotInput{
-				ID:                   req.ID,
-				TenantID:             req.TenantID,
-				ProcessingToken:      req.ProcessingToken,
-				TicketGLPIComputerID: resolvedGLPICompID,
-				ActorUserID:          in.ActorUserID,
+				ID:                    req.ID,
+				TenantID:              req.TenantID,
+				ProcessingToken:       req.ProcessingToken,
+				TicketGLPIComputerID:  resolvedGLPICompID,
+				TicketDeviceBindingID: resolvedBindingID,
+				ActorUserID:           in.ActorUserID,
 			})
 			if enrichErr != nil {
 				// If token was lost to orphan recovery, abort before calling CreateTicket
@@ -333,7 +362,15 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 				}
 				return nil, enrichErr
 			}
-			req.TicketGLPIComputerID = resolvedGLPICompID
+			if resolvedGLPICompID != nil {
+				req.TicketGLPIComputerID = resolvedGLPICompID
+			}
+			if resolvedBindingID != nil {
+				req.TicketDeviceBindingID = resolvedBindingID
+				if req.DeviceBindingID == nil {
+					req.DeviceBindingID = resolvedBindingID
+				}
+			}
 		}
 	}
 

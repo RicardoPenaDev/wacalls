@@ -1,6 +1,6 @@
 # T-008 — Realinhamento do produto: central técnica + portal do card Windows
 
-Status: **Etapa 1 (análise) e F0 (inventário técnico do card) concluídos. Próxima ação técnica: correção isolada da persistência de vínculo (D-025). Nenhum código de funcionalidade novo implementado.**
+Status: **Etapa 1 (análise), F0 (inventário técnico do card) e Fix D-025 (persistência de vínculo) concluídos. Próxima ação técnica: F1 — Conversation Core (Fase 4A).**
 
 Esta tarefa reorganiza a arquitetura e a interface do produto: o WACalls ServiceOps evolui para uma central integrada de suporte técnico (atendimentos, filas, chamados GLPI, equipamentos e Tactical RMM), superando o modelo de painel lateral sobre o WhatsApp.
 
@@ -10,7 +10,7 @@ Esta tarefa reorganiza a arquitetura e a interface do produto: o WACalls Service
   - **Gates 1-4:** Concluídos e publicados em `origin/main` no commit `f883897`.
   - **Gate 5 (Homologação de Interface):** Interrompido a pedido do usuário para alinhamento da direção do produto.
   - **Painel lateral atual:** Baseline técnico provisório; não representa a experiência final esperada para o cockpit ServiceOps.
-  - **Defeito de persistência automática de vínculo (D-025):** Diagnosticado durante o Gate 5 — chamados criados via resolução automática de hostname persistiam `glpi_computer_id`, mas mantinham `device_binding_id=NULL`, impedindo a carga do badge de vínculo e da telemetria Tactical. Correção técnica isolada aprovada para execução antes das novas fases.
+  - **Defeito de persistência automática de vínculo (D-025):** Corrigido no backend para persistir `device_binding_id` na criação e enriquecimento exato por hostname, com cobertura por testes unitários e E2E 12/12 (sem backfill em tickets passados).
   - **Homologação da interface ServiceOps:** Nenhuma homologação da interface final foi concluída.
 
 ## 2. Inventário Técnico do Card Windows (F0 — Concluído)
@@ -70,8 +70,8 @@ Quando hostname ou patrimônio resultar em correspondência exata e única de `d
 | Etapa | Escopo | Depende de | Status |
 |---|---|---|---|
 | **F0** | Inventário do card | — | Concluído |
-| **Fix D-025** | Persistência do `device_binding_id` | — | Próxima |
-| **F1** | Conversation Core | Fix D-025 | Pendente |
+| **Fix D-025** | Persistência do `device_binding_id` | — | **Concluído** |
+| **F1** | Conversation Core | Fix D-025 | Próxima |
 | **F2** | Filas e roteamento por unidade/setor | Contexto de equipamento existente e F1 | Pendente |
 | **F3** | Interface ServiceOps do técnico | F1 e F2 | Pendente |
 | **F4** | Identidade do dispositivo e portal/chat no card | F0, Fix D-025, F1, F2 e F3 | Pendente |

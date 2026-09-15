@@ -4,8 +4,8 @@ Atualizado em: 2026-09-15
 Fase atual: Fase 1 — MVP GLPI + Tactical (T-007 Gate 4 concluído e publicado;
 Gate 5 interrompido); planejamento de realinhamento ServiceOps em andamento (T-008).
 Tarefa atual: `T-008` — Realinhamento de produto (central técnica + portal do
-card Windows). F0 (inventário técnico do card) concluído. Próximo passo técnico:
-correção isolada da persistência automática de vínculo (D-025).
+card Windows). F0 (inventário técnico do card) concluído. Fix D-025 (persistência
+do vínculo na criação) implementado e validado. Próximo passo: F1 (Conversation Core).
 
 ## Estado das Entregas e Fases
 
@@ -17,8 +17,9 @@ correção isolada da persistência automática de vínculo (D-025).
     para realinhamento de produto (T-008).
   - **Painel lateral atual:** Baseline técnico provisório (não representa a
     experiência final ServiceOps).
-  - **Defeito estrutural de persistência:** Identificado na resolução automática
-    por hostname (`device_binding_id=NULL`, ver D-025) — pendente de correção.
+  - **Defeito estrutural de persistência (D-025):** Corrigido no backend com
+    persistência de `device_binding_id` na criação e enriquecimento, validado
+    com testes unitários e matriz E2E 12/12. Sem backfill em tickets anteriores.
   - **Homologação da interface final ServiceOps:** Nenhuma homologação concluída.
 
 - **T-008 (Realinhamento de Produto e Card Windows):**
@@ -39,8 +40,8 @@ correção isolada da persistência automática de vínculo (D-025).
       O identificador nunca equivale a autenticação.
   - **Fases e dependências da T-008:**
     - F0 — Inventário do card: Concluído.
-    - Fix D-025 — Persistência do `device_binding_id`: Próxima.
-    - F1 — Conversation Core: Depende de Fix D-025.
+    - Fix D-025 — Persistência do `device_binding_id`: Concluído.
+    - F1 — Conversation Core: Próxima (depende de Fix D-025).
     - F2 — Filas e roteamento por unidade/setor: Depende do contexto de equipamento existente e F1.
     - F3 — Interface ServiceOps do técnico: Depende de F1 e F2.
     - F4 — Identidade do dispositivo e portal/chat no card: Depende de F0, Fix D-025, F1, F2 e F3.
@@ -93,9 +94,8 @@ correção isolada da persistência automática de vínculo (D-025).
 
 ## Bloqueios e Próximos Passos Obrigatórios
 
-1. **Próxima Ação Técnica:** Implementar a correção isolada da persistência de
-   `device_binding_id` na criação automática de chamado (D-025) com testes unitários
-   em ambiente isolado (sem chamadas externas e sem backfill em tickets passados).
+1. **Próxima Ação Técnica:** Avançar para F1 (Conversation Core — Fase 4A do roadmap)
+   para unificar o modelo de conversas multicanal (`conversation_id`).
 2. Ticket **#4** no GLPI de homologação: registro formal do T-007 Gate 4, protegido e
    preservado. Ticket **#5**: demonstração visual complementar, intocado.
 3. Confirmar timezone real do formato legado do Tactical caso volte a ocorrer (D-022).

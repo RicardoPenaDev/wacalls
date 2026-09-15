@@ -305,9 +305,38 @@ func (s *server) handleCreateChatSupportTicket(w http.ResponseWriter, r *http.Re
 	}
 
 	dto := s.toPublicSupportRequestDTO(res.Request)
+	var deviceDTO *DeviceBindingPublicDTO
+	var tacticalAgent any = nil
+	var warnings []string
+
+	if res.Request.DeviceBindingID != nil && *res.Request.DeviceBindingID != "" {
+		b, bErr := s.bindings.GetForTenant(r.Context(), u.TenantID(), *res.Request.DeviceBindingID)
+		if bErr != nil {
+			s.log.Warn("support: failed to load device binding for ticket envelope",
+				"tenant", u.TenantID(), "binding_id", *res.Request.DeviceBindingID)
+			warnings = append(warnings, "context_unavailable")
+		} else {
+			d := toPublicDeviceBindingDTO(b)
+			deviceDTO = &d
+			if s.isTacticalEnabled() && s.tacticalClient != nil && b.TacticalAgentID != "" {
+				agent, aErr := s.tacticalClient.GetAgent(r.Context(), b.TacticalAgentID)
+				if aErr == nil {
+					tacticalAgent = agent
+				} else {
+					warnings = append(warnings, "tactical_unavailable")
+				}
+			}
+		}
+	}
+	if warnings == nil {
+		warnings = []string{}
+	}
+
 	respEnv := SupportTicketResponseEnvelope{
 		SupportRequest: dto,
-		Warnings:       []string{},
+		Device:         deviceDTO,
+		TacticalAgent:  tacticalAgent,
+		Warnings:       warnings,
 	}
 
 	if res.IsReplay {

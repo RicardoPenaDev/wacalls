@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -484,6 +485,57 @@ func TestSupportStore_SnapshotEnrichment(t *testing.T) {
 		}
 		if updated.TicketDeviceBindingID == nil || *updated.TicketDeviceBindingID != devBindingID {
 			t.Fatalf("expected TicketDeviceBindingID %q, got %v", devBindingID, updated.TicketDeviceBindingID)
+		}
+		if updated.DeviceBindingID == nil || *updated.DeviceBindingID != devBindingID {
+			t.Fatalf("expected DeviceBindingID %q populated from NULL by COALESCE, got %v", devBindingID, updated.DeviceBindingID)
+		}
+
+		var rawDevBindingID, rawTicketDevBindingID sql.NullString
+		err = tdb.DB.QueryRowContext(ctx, "SELECT device_binding_id, ticket_device_binding_id FROM support_requests WHERE id = ? AND tenant_id = ?", req.ID, req.TenantID).Scan(&rawDevBindingID, &rawTicketDevBindingID)
+		if err != nil {
+			t.Fatalf("query support_requests failed: %v", err)
+		}
+		if !rawDevBindingID.Valid || rawDevBindingID.String != devBindingID {
+			t.Fatalf("expected raw device_binding_id %q, got %v", devBindingID, rawDevBindingID)
+		}
+		if !rawTicketDevBindingID.Valid || rawTicketDevBindingID.String != devBindingID {
+			t.Fatalf("expected raw ticket_device_binding_id %q, got %v", devBindingID, rawTicketDevBindingID)
+		}
+
+		// Prove that an existing explicit device_binding_id is NOT overwritten by COALESCE
+		explicitBinding := "explicit-binding-001"
+		inExplicit := sampleCreateInput("t-enrich", "idemp-enrich-explicit", strings.Repeat("1", 64))
+		inExplicit.DeviceBindingID = &explicitBinding
+		inExplicit.TicketDeviceBindingID = &explicitBinding
+		reqExplicit, err := store.CreateTicketRequest(ctx, inExplicit)
+		if err != nil {
+			t.Fatalf("CreateTicketRequest with explicit binding failed: %v", err)
+		}
+
+		newEnrichedBinding := "enriched-binding-999"
+		err = store.EnrichSnapshot(ctx, EnrichSnapshotInput{
+			ID:                    reqExplicit.ID,
+			TenantID:              reqExplicit.TenantID,
+			ProcessingToken:       reqExplicit.ProcessingToken,
+			TicketGLPIComputerID:  &compID,
+			TicketDeviceBindingID: &newEnrichedBinding,
+			ActorUserID:           "user-1",
+		})
+		if err != nil {
+			t.Fatalf("EnrichSnapshot on explicit request failed: %v", err)
+		}
+
+		updatedExplicit, err := store.GetByID(ctx, reqExplicit.TenantID, reqExplicit.ID)
+		if err != nil {
+			t.Fatalf("GetByID on explicit request failed: %v", err)
+		}
+		// device_binding_id must retain explicitBinding via COALESCE
+		if updatedExplicit.DeviceBindingID == nil || *updatedExplicit.DeviceBindingID != explicitBinding {
+			t.Fatalf("expected explicit DeviceBindingID %q preserved, got %v", explicitBinding, updatedExplicit.DeviceBindingID)
+		}
+		// ticket_device_binding_id is updated to the new snapshot
+		if updatedExplicit.TicketDeviceBindingID == nil || *updatedExplicit.TicketDeviceBindingID != newEnrichedBinding {
+			t.Fatalf("expected TicketDeviceBindingID %q updated, got %v", newEnrichedBinding, updatedExplicit.TicketDeviceBindingID)
 		}
 
 		events, err := store.ListEvents(ctx, req.TenantID, req.ID)

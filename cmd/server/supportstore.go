@@ -453,11 +453,11 @@ func (s *supportStore) EnrichSnapshot(ctx context.Context, in EnrichSnapshotInpu
 	defer func() { _ = tx.Rollback() }()
 
 	const query = `UPDATE support_requests
-		SET ticket_glpi_computer_id = ?, ticket_device_binding_id = ?, updated_at = ?
+		SET ticket_glpi_computer_id = ?, ticket_device_binding_id = ?, device_binding_id = COALESCE(device_binding_id, ?), updated_at = ?
 		WHERE id = ? AND tenant_id = ? AND sync_state = 'processing' AND processing_token = ?`
 
 	res, err := tx.ExecContext(ctx, query,
-		nullString(in.TicketGLPIComputerID), nullString(in.TicketDeviceBindingID), now,
+		nullString(in.TicketGLPIComputerID), nullString(in.TicketDeviceBindingID), nullString(in.TicketDeviceBindingID), now,
 		in.ID, in.TenantID, in.ProcessingToken,
 	)
 	if err != nil {

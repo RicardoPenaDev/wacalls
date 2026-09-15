@@ -20,6 +20,7 @@ func (s *server) registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/support/requests/{id}/reconcile", s.requireAuth(s.handleReconcileSupportRequest))
 	mux.HandleFunc("GET /api/support/devices", s.requireAuth(s.handleSearchSupportDevices))
 	mux.HandleFunc("GET /api/support/devices/{id}", s.requireAuth(s.handleGetSupportDevice))
+	mux.HandleFunc("POST /api/support/devices/{id}/refresh", s.requireAuth(s.handleRefreshSupportDevice))
 	mux.HandleFunc("PUT /api/support/requests/{id}/device", s.requireAuth(s.handleUpdateSupportRequestDevice))
 }
 
@@ -30,6 +31,7 @@ type supportServiceAPI interface {
 	Retry(ctx context.Context, in ServiceRetryInput) (*SupportRequest, error)
 	Reconcile(ctx context.Context, in ServiceReconcileInput) (*SupportRequest, error)
 	UpdateDevice(ctx context.Context, in ServiceUpdateDeviceInput) (*SupportRequest, bool, error)
+	RefreshDeviceBinding(ctx context.Context, in ServiceRefreshDeviceInput) (DeviceBinding, error)
 }
 
 func (s *server) isSupportEnabled() bool {
@@ -658,6 +660,77 @@ func (s *server) handleGetSupportDevice(w http.ResponseWriter, r *http.Request) 
 		"glpiComputer":  nil,
 		"tacticalAgent": tacticalAgent,
 		"warnings":      warnings,
+	})
+}
+
+// handleRefreshSupportDevice re-runs read-only GLPI/Tactical hostname
+// lookups for an already-persisted device binding and merges any newly
+// confirmed identifiers (T-007 7.4-R1). Admin-only: it is the supported,
+// non-destructive way to correct a stale match_status (e.g. missing_tactical
+// left over from a past Tactical lookup failure — see docs/STATUS.md for
+// the Gate 4 incident) without SQL access, a duplicate ticket, or touching
+// any existing support request/ticket. The hostname is always the one
+// already stored on the binding; no body field can override it.
+func (s *server) handleRefreshSupportDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.isSupportEnabled() {
+		writeSupportError(w, http.StatusServiceUnavailable, "support_disabled", "support feature is disabled", 0)
+		return
+	}
+	u := currentUserFromReq(r)
+	if u == nil {
+		writeSupportError(w, http.StatusUnauthorized, "unauthorized", "unauthorized", 0)
+		return
+	}
+	if !u.IsAdmin() {
+		writeSupportError(w, http.StatusForbidden, "forbidden", "admin role required to refresh a device binding", 0)
+		return
+	}
+	// Tolerate an absent body; reject anything else, matching the retry
+	// endpoint's CSRF/content-type posture for state-changing POSTs with no
+	// meaningful payload.
+	if r.Body != nil {
+		var buf [2]byte
+		n, _ := r.Body.Read(buf[:])
+		if n > 0 {
+			if err := enforceJSONContentType(r); err != nil {
+				writeSupportError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json", 0)
+				return
+			}
+			combined := io.MultiReader(bytes.NewReader(buf[:n]), r.Body)
+			limited := io.LimitReader(combined, 1024+1)
+			dec := json.NewDecoder(limited)
+			dec.DisallowUnknownFields()
+			var dummy struct{}
+			if err := dec.Decode(&dummy); err != nil {
+				writeSupportError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", 0)
+				return
+			}
+			var trailing any
+			if err := dec.Decode(&trailing); err != io.EOF {
+				writeSupportError(w, http.StatusBadRequest, "invalid_request", "multiple JSON documents not allowed", 0)
+				return
+			}
+		}
+	}
+	id := r.PathValue("id")
+	if !isValidID(id, 128) {
+		writeSupportError(w, http.StatusBadRequest, "invalid_id", "invalid device binding id", 0)
+		return
+	}
+	updated, err := s.supportSvc.RefreshDeviceBinding(r.Context(), ServiceRefreshDeviceInput{
+		ID:       id,
+		TenantID: u.TenantID(),
+	})
+	if err != nil {
+		if errors.Is(err, ErrDeviceBindingNotFound) {
+			writeSupportError(w, http.StatusNotFound, "not_found", "device binding not found", 0)
+			return
+		}
+		writeSupportError(w, http.StatusInternalServerError, "internal_error", "failed to refresh device binding", 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"device": toPublicDeviceBindingDTO(updated),
 	})
 }
 

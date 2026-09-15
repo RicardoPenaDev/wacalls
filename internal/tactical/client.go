@@ -79,7 +79,11 @@ func sameOrigin(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
-// ListAgents returns the mapped stable subset from GET /agents/.
+// ListAgents returns the mapped stable subset from GET /agents/. A single
+// agent with an unparseable last_seen no longer aborts the whole listing
+// (see mapListAgent/parseLastSeen): that agent is still returned, with
+// LastSeenValid=false, so one bad timestamp elsewhere in the tenant can't
+// hide every other agent from hostname lookups.
 func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
 	body, err := c.get(ctx, "/agents/", "list agents")
 	if err != nil {
@@ -91,11 +95,7 @@ func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
 	}
 	agents := make([]Agent, 0, len(wire))
 	for _, item := range wire {
-		agent, err := mapListAgent(item)
-		if err != nil {
-			return nil, &Error{Op: "list agents", Kind: ErrBadResponse}
-		}
-		agents = append(agents, agent)
+		agents = append(agents, mapListAgent(item))
 	}
 	return agents, nil
 }
@@ -113,11 +113,7 @@ func (c *Client) GetAgent(ctx context.Context, agentID string) (Agent, error) {
 	if err := decodeJSON(body, &wire); err != nil {
 		return Agent{}, &Error{Op: "get agent", Kind: ErrBadResponse}
 	}
-	agent, err := mapDetailAgent(wire)
-	if err != nil {
-		return Agent{}, &Error{Op: "get agent", Kind: ErrBadResponse}
-	}
-	return agent, nil
+	return mapDetailAgent(wire), nil
 }
 
 func validAgentID(agentID string) bool {
@@ -297,41 +293,60 @@ type detailAgentDTO struct {
 	Plat             string      `json:"plat"`
 }
 
-func mapListAgent(wire listAgentDTO) (Agent, error) {
-	lastSeen, err := parseLastSeen(wire.LastSeen)
-	if err != nil {
-		return Agent{}, err
-	}
+func mapListAgent(wire listAgentDTO) Agent {
+	lastSeen, ok := parseLastSeen(wire.LastSeen)
 	return Agent{
 		AgentID: wire.AgentID, Hostname: wire.Hostname, ClientName: wire.ClientName,
-		SiteName: wire.SiteName, Status: wire.Status, LastSeen: lastSeen,
+		SiteName: wire.SiteName, Status: wire.Status, LastSeen: lastSeen, LastSeenValid: ok,
 		MonitoringType: wire.MonitoringType, OperatingSystem: wire.OperatingSystem,
 		LoggedUser: wire.LoggedUsername, LocalIPs: wire.LocalIPs,
 		SerialNumber: wire.SerialNumber, NeedsReboot: wire.NeedsReboot,
 		MaintenanceMode: wire.MaintenanceMode,
-	}, nil
+	}
 }
 
-func mapDetailAgent(wire detailAgentDTO) (Agent, error) {
-	lastSeen, err := parseLastSeen(wire.LastSeen)
-	if err != nil {
-		return Agent{}, err
-	}
+func mapDetailAgent(wire detailAgentDTO) Agent {
+	lastSeen, ok := parseLastSeen(wire.LastSeen)
 	return Agent{
 		AgentID: wire.AgentID, Hostname: wire.Hostname, ClientName: wire.Client,
 		SiteName: wire.SiteName, SiteID: wire.Site.String(), Status: wire.Status,
-		LastSeen: lastSeen, MonitoringType: wire.MonitoringType,
+		LastSeen: lastSeen, LastSeenValid: ok, MonitoringType: wire.MonitoringType,
 		OperatingSystem: wire.OperatingSystem, LoggedUser: wire.LoggedInUsername,
 		LastLoggedUser: wire.LastLoggedInUser, LocalIPs: wire.LocalIPs,
 		SerialNumber: wire.SerialNumber, NeedsReboot: wire.NeedsReboot,
 		MaintenanceMode: wire.MaintenanceMode, Version: wire.Version, Plat: wire.Plat,
-	}, nil
+	}
 }
 
-func parseLastSeen(value string) (time.Time, error) {
+// tacticalLegacyLastSeenLayout is an older Tactical RMM last_seen shape,
+// observed without any UTC offset (e.g. "09/14/2026 22:58:35"). Its
+// timezone is not documented anywhere in the Tactical API, config, or this
+// repo's docs. A live read-only check against the homologation tenant
+// (2026-09-15) found every agent reporting the newer RFC3339 "...Z" shape
+// instead, so the legacy shape could not be cross-checked against a real
+// "online" timestamp. Until a live occurrence confirms it, values in this
+// shape are recognized (so they are not confused with garbage) but treated
+// as untrusted: parseLastSeen returns a zero time and ok=false rather than
+// silently guessing UTC or local time.
+const tacticalLegacyLastSeenLayout = "01/02/2006 15:04:05"
+
+// parseLastSeen tolerates every last_seen shape observed from Tactical RMM
+// plus the documented RFC3339 (time.Parse already accepts an optional
+// fractional-second component and either "Z" or a numeric offset against
+// that single layout). It never returns an error: a missing, malformed, or
+// timezone-unconfirmed value degrades to a zero time with ok=false instead
+// of failing the whole agent record (see mapListAgent/mapDetailAgent) or
+// aborting ListAgents for every other agent in the tenant.
+func parseLastSeen(value string) (t time.Time, ok bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return time.Time{}, nil
+		return time.Time{}, true
 	}
-	return time.Parse(time.RFC3339, value)
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed, true
+	}
+	if _, err := time.Parse(tacticalLegacyLastSeenLayout, value); err == nil {
+		return time.Time{}, false
+	}
+	return time.Time{}, false
 }

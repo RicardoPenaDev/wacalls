@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,7 +112,7 @@ func setupTestSupportService(t *testing.T) (*SupportService, *supportStore, *dev
 	mockG := &mockGLPIClient{}
 	mockT := &mockTacticalClient{}
 
-	svc := NewSupportService(store, bStore, mockG, mockT)
+	svc := NewSupportService(store, bStore, mockG, mockT, slog.Default())
 	return svc, store, bStore, mockG, mockT, tdb
 }
 
@@ -182,8 +183,8 @@ func TestSupportService_CreateTicketSuccess(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("expected device binding to be created, err: %v, found: %v", err, found)
 	}
-	if binding.GLPIComputerID != "505" || binding.MatchStatus != "matched" {
-		t.Fatalf("expected binding GLPIComputerID=505 and match_status=matched, got %+v", binding)
+	if binding.GLPIComputerID != "505" || binding.TacticalAgentID != "tac-10" || binding.MatchStatus != "matched" {
+		t.Fatalf("expected binding GLPIComputerID=505, TacticalAgentID=tac-10 and match_status=matched, got %+v", binding)
 	}
 
 	// Verify HTML escaping and formatting in GLPI call
@@ -219,6 +220,57 @@ func TestSupportService_CreateTicketSuccess(t *testing.T) {
 		if events[i].Action != exp {
 			t.Errorf("event %d: expected action %s, got %s", i, exp, events[i].Action)
 		}
+	}
+}
+
+// TestSupportService_TacticalInvalidLastSeenStillMatches guards a general
+// defect independently confirmed by code inspection (whether it is what
+// produced the T-007 Gate 4 missing_tactical result is unconfirmed — see
+// docs/STATUS.md and D-022): a Tactical agent located with an
+// unparseable/untrusted last_seen (tactical.Agent.LastSeenValid=false) must
+// still count as found. match_status must be "matched" and
+// tactical_agent_id must be populated — last_seen is auxiliary telemetry,
+// not an identity signal.
+func TestSupportService_TacticalInvalidLastSeenStillMatches(t *testing.T) {
+	svc, _, bStore, mockG, mockT, _ := setupTestSupportService(t)
+	ctx := context.Background()
+
+	mockG.findComputerFn = func(ctx context.Context, hostname string) (glpi.Computer, error) {
+		if strings.EqualFold(hostname, "SDE-ARS-RCP-02") {
+			return glpi.Computer{ID: "505", Name: "SDE-ARS-RCP-02"}, nil
+		}
+		return glpi.Computer{}, glpi.ErrNotFound
+	}
+	mockT.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		if strings.EqualFold(hostname, "SDE-ARS-RCP-02") {
+			// Simulates the fixed tactical client: the agent is still
+			// located (no error) even though its last_seen could not be
+			// trusted.
+			return tactical.Agent{AgentID: "tac-77", Hostname: "SDE-ARS-RCP-02", LastSeenValid: false}, nil
+		}
+		return tactical.Agent{}, errors.New("not found")
+	}
+	mockG.createTicketFn = func(ctx context.Context, in glpi.TicketInput) (glpi.CreatedTicket, error) {
+		return glpi.CreatedTicket{ID: "1000", Href: "https://glpi.invalid/api.php/v2.3/Assistance/Ticket/1000"}, nil
+	}
+
+	input := sampleServiceCreateInput("tenant-1", "idemp-key-lastseen-01")
+	if _, err := svc.CreateTicket(ctx, input); err != nil {
+		t.Fatalf("CreateTicket failed: %v", err)
+	}
+
+	binding, found, err := bStore.FindByHostname(ctx, "tenant-1", "SDE-ARS-RCP-02")
+	if err != nil || !found {
+		t.Fatalf("expected device binding to be created, err: %v, found: %v", err, found)
+	}
+	if binding.MatchStatus != "matched" {
+		t.Fatalf("expected match_status=matched despite unparseable last_seen, got %+v", binding)
+	}
+	if binding.TacticalAgentID != "tac-77" {
+		t.Fatalf("expected tactical_agent_id=tac-77 despite unparseable last_seen, got %+v", binding)
+	}
+	if binding.GLPIComputerID != "505" {
+		t.Fatalf("expected glpi_computer_id=505, got %+v", binding)
 	}
 }
 
@@ -1033,7 +1085,7 @@ func TestSupportService_CreateTicket_CrossTenantDeviceBindingRejected(t *testing
 
 	// 6. Test with a spy backend that only implements deviceBindingStoreBackend (no Get method)
 	spy := &bindingSpyBackend{}
-	svcWithSpy := NewSupportService(svc.store, spy, mockG, nil)
+	svcWithSpy := NewSupportService(svc.store, spy, mockG, nil, slog.Default())
 	bID := "dev-binding-spy-1"
 	spyInput := sampleServiceCreateInput("tenant-A", "idemp-spy-dev-1234567")
 	spyInput.DeviceBindingID = &bID

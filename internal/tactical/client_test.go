@@ -337,14 +337,104 @@ func TestReadLimitedBoundary(t *testing.T) {
 	}
 }
 
-func TestInvalidLastSeenIsBadResponse(t *testing.T) {
+func TestParseLastSeen(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		wantValid bool
+		wantTime  time.Time
+	}{
+		{"rfc3339_utc", "2026-09-12T12:00:00Z", true, time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)},
+		{"rfc3339_offset", "2026-09-12T09:00:00-03:00", true, time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)},
+		{"rfc3339_fractional_seconds", "2026-09-15T01:51:51.544513Z", true, time.Date(2026, 9, 15, 1, 51, 51, 544513000, time.UTC)},
+		{"legacy_tactical_format_timezone_unconfirmed", "09/14/2026 22:58:35", false, time.Time{}},
+		{"surrounding_whitespace", "  2026-09-12T12:00:00Z  ", true, time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)},
+		{"empty", "", true, time.Time{}},
+		{"whitespace_only", "   ", true, time.Time{}},
+		{"invalid_garbage", "not-a-time", false, time.Time{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseLastSeen(tc.value)
+			if ok != tc.wantValid {
+				t.Fatalf("valid: got %v, want %v (time=%v)", ok, tc.wantValid, got)
+			}
+			if tc.wantValid && !got.Equal(tc.wantTime) {
+				t.Fatalf("time: got %v, want %v", got, tc.wantTime)
+			}
+			if !tc.wantValid && !got.IsZero() {
+				t.Fatalf("expected zero time for invalid/unconfirmed input, got %v", got)
+			}
+		})
+	}
+}
+
+// TestListAgentsToleratesOneInvalidLastSeen replaces the old
+// TestInvalidLastSeenIsBadResponse: a single agent with an unparseable
+// last_seen must no longer abort the whole tenant's agent list. This is a
+// general defect (independently confirmed by code inspection, not tied to
+// any specific incident): one malformed record used to make
+// FindAgentByHostname fail for every hostname in the tenant. Whether this
+// specific mechanism is what produced the T-007 Gate 4 missing_tactical
+// result is unconfirmed — no raw Tactical response from that run survives
+// to verify it (see docs/STATUS.md and D-022); it is guarded here on its
+// own merits.
+func TestListAgentsToleratesOneInvalidLastSeen(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[{"agent_id":"a1","hostname":"HOST","last_seen":"not-a-time"}]`)
+		fmt.Fprint(w, `[
+			{"agent_id":"a1","hostname":"GOOD-HOST","last_seen":"2026-09-12T12:00:00Z"},
+			{"agent_id":"a2","hostname":"OTHER-HOST","last_seen":"09/14/2026 22:58:35"}
+		]`)
 	}))
 	defer server.Close()
 	client := mustClient(t, testConfig(server.URL))
-	if _, err := client.ListAgents(context.Background()); !errors.Is(err, ErrBadResponse) {
-		t.Fatalf("expected ErrBadResponse, got %v", err)
+	agents, err := client.ListAgents(context.Background())
+	if err != nil {
+		t.Fatalf("expected ListAgents to tolerate one bad last_seen, got err: %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+	var good, other *Agent
+	for i := range agents {
+		switch agents[i].AgentID {
+		case "a1":
+			good = &agents[i]
+		case "a2":
+			other = &agents[i]
+		}
+	}
+	if good == nil || !good.LastSeenValid || !good.LastSeen.Equal(time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("expected agent a1 with valid last_seen, got %+v", good)
+	}
+	if other == nil || other.LastSeenValid || !other.LastSeen.IsZero() {
+		t.Fatalf("expected agent a2 recognized but LastSeenValid=false with zero time, got %+v", other)
+	}
+}
+
+// TestFindAgentByHostnameToleratesOwnInvalidLastSeen covers the scenario
+// originally suspected for T-007 Gate 4 (unconfirmed — see docs/STATUS.md):
+// the target agent itself has an unparseable last_seen. It must still be
+// located (foundTactical=true upstream in SupportService), just with
+// LastSeenValid=false and a zero LastSeen.
+func TestFindAgentByHostnameToleratesOwnInvalidLastSeen(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"agent_id":"a1","hostname":"SDE-ARS-RCP-02","last_seen":"09/14/2026 22:58:35"}]`)
+	}))
+	defer server.Close()
+	client := mustClient(t, testConfig(server.URL))
+	agent, err := client.FindAgentByHostname(context.Background(), "SDE-ARS-RCP-02")
+	if err != nil {
+		t.Fatalf("expected agent to be located despite invalid last_seen, got err: %v", err)
+	}
+	if agent.AgentID != "a1" {
+		t.Fatalf("expected agent a1, got %+v", agent)
+	}
+	if agent.LastSeenValid {
+		t.Fatalf("expected LastSeenValid=false for unparseable last_seen, got true")
+	}
+	if !agent.LastSeen.IsZero() {
+		t.Fatalf("expected zero LastSeen for unparseable value, got %v", agent.LastSeen)
 	}
 }
 

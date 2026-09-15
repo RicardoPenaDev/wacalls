@@ -265,6 +265,51 @@ Motivo: Prevenir injeção de links maliciosos, impedir vazamento de rotas inter
 Alternativas consideradas: Opção B (montagem no frontend com base injetada em tempo de build) e Opção C (remoção definitiva do link mantendo apenas cópia do ID).
 Consequências: Acesso seguro e auditado à tela do chamado no GLPI; falha no startup se houver divergência de origem entre a API e a interface web; preservação da cópia de número para chamados legados e ambientes sem link web habilitado.
 
+## D-022 — parseLastSeen do Tactical não assume fuso do formato legado sem offset
+
+Data: 2026-09-15 · Status: aceita
+
+Decisão: `internal/tactical/client.go` (`parseLastSeen`) aceita RFC3339 (com
+ou sem offset, com ou sem frações de segundo — que já eram compatíveis com o
+parsing original), string vazia/nula e espaços nas bordas sem nunca falhar.
+O formato legado relatado inicialmente durante o Gate 4 (`MM/DD/YYYY
+HH:mm:ss`, sem offset) é reconhecido — não é confundido com lixo — mas
+tratado como não confiável (`LastSeenValid=false`, hora zero) em vez de
+assumir UTC ou horário local. Um timestamp inválido ou não confiável nunca
+falha `ListAgents`/`GetAgent` nem transforma um agente existente em
+"ausente" (`missing_tactical`); apenas a telemetria auxiliar de `last_seen`
+fica indisponível, com aviso sanitizado registrado pelo `SupportService`.
+Motivo: Uma checagem read-only ao vivo no tenant de homologação em
+2026-09-15 encontrou todos os 29 agentes retornando RFC3339 com `Z`,
+impossibilitando cruzar o formato legado contra um timestamp real "online"
+para confirmar seu fuso. Investigação adicional (mesma data) não encontrou
+nenhuma evidência bruta sobrevivente (logs do servidor, scripts de Gate
+1/Gate 4) de que a API tenha de fato retornado `last_seen` fora de RFC3339
+durante o Gate 4 — `server.stdout.log`/`server.stderr.log` não mencionam
+Tactical/last_seen/RicardoSMS nesse período, e o pacote `tactical` não
+tinha logger antes desta correção. Uma reprodução controlada mostrou que
+converter um `last_seen` RFC3339 real para `[datetime]` no PowerShell e
+exibi-lo com `ToString()` padrão nesta máquina produz exatamente uma string
+`MM/dd/yyyy HH:mm:ss` em horário local — a mesma forma relatada como
+"bruta" no Gate 4 — consistente com artefato de apresentação do PowerShell,
+não com conteúdo da API. Não é possível confirmar isso retroativamente com
+certeza absoluta; por isso o fuso do formato legado segue tratado como não
+confirmado, e não como comprovadamente-UTC nem comprovadamente-local.
+Alternativas consideradas: Assumir UTC para o formato legado (rejeitada —
+sem evidência); assumir `America/Sao_Paulo` (rejeitada — mesmo motivo);
+não tolerar o formato legado (rejeitada — é um defeito real e
+independentemente confirmado por inspeção de código: um único registro
+malformado em `ListAgents()` derruba `FindAgentByHostname` para qualquer
+hostname do tenant, não só o agente afetado; vale como hardening preventivo
+mesmo sem certeza de que foi a causa do Gate 4 — a causa comprovada desse
+incidente foi `SupportService` descartando `Agent.AgentID` mesmo em lookups
+bem-sucedidos, corrigida separadamente).
+Consequências: `last_seen` do formato legado fica ausente (zero) até uma
+ocorrência real, com log bruto preservado, permitir confirmar o fuso;
+identidade do agente (`agent_id`, `hostname`, `status`) nunca é perdida por
+causa disso; `device_bindings.tactical_agent_id` passa a ser preenchido
+corretamente mesmo quando `last_seen` não é confiável.
+
 ## Modelo para novas decisões
 
 ```text

@@ -87,7 +87,7 @@ func setupSupportAPITest(t *testing.T, supportEnabled bool, tacticalConfigured b
 		if tacticalConfigured {
 			tacticalCli = mockT
 		}
-		supSvc = NewSupportService(sStore, bStore, glpiCli, tacticalCli)
+		supSvc = NewSupportService(sStore, bStore, glpiCli, tacticalCli, slog.Default())
 	}
 
 	container := sqlstore.NewWithDB(tdb.DB, "sqlite", waLog.Noop)
@@ -792,6 +792,158 @@ func TestSupportAPI_TacticalDegradation(t *testing.T) {
 	}
 	if len(resp2.Warnings) != 1 || resp2.Warnings[0] != "tactical_unavailable" {
 		t.Fatalf("expected warning tactical_unavailable, got %v", resp2.Warnings)
+	}
+}
+
+// 9b. Device Refresh (T-007 7.4-R1): admin-only, tenant-scoped, read-only
+// re-resolution of an existing device binding. Covers authorization, tenant
+// isolation, successful enrichment, idempotency, and identifier preservation
+// on partial integration failure. Uses glpi_computer_id=59, the real value
+// confirmed in the preserved Gate 4 homologation database (docs/STATUS.md)
+// — not a placeholder.
+func TestSupportAPI_RefreshDevice(t *testing.T) {
+	setup := setupSupportAPITest(t, true, true)
+	h := setup.srv.routes()
+	ctx := context.Background()
+
+	// Pre-existing binding: GLPI already resolved, Tactical missing — the
+	// state left behind after Gate 4 (root cause: SupportService discarding
+	// Agent.AgentID on a successful lookup; see docs/STATUS.md and D-022 for
+	// what remains unconfirmed about why the lookup itself failed).
+	b1, err := setup.bStore.Upsert(ctx, DeviceBinding{
+		OwnerID:        setup.user1ID,
+		TenantID:       setup.user1ID,
+		Hostname:       "RicardoSMS",
+		GLPIComputerID: "59",
+		MatchStatus:    "missing_tactical",
+	})
+	if err != nil {
+		t.Fatalf("failed to seed binding: %v", err)
+	}
+
+	// Operator (non-admin) -> 403.
+	rec := doRequest(h, "POST", "/api/support/devices/"+b1.ID+"/refresh", setup.user1Token, nil, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin refresh, got %d. body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Nonexistent binding -> 404.
+	rec = doRequest(h, "POST", "/api/support/devices/does-not-exist/refresh", setup.admin1Token, nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent binding, got %d", rec.Code)
+	}
+
+	// Cross-tenant isolation -> 404, never 403 (never confirms existence).
+	b2, err := setup.bStore.Upsert(ctx, DeviceBinding{
+		OwnerID:  setup.user2ID,
+		TenantID: setup.user2ID,
+		Hostname: "PC-TENANT-2",
+	})
+	if err != nil {
+		t.Fatalf("failed to seed tenant-2 binding: %v", err)
+	}
+	rec = doRequest(h, "POST", "/api/support/devices/"+b2.ID+"/refresh", setup.admin1Token, nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-tenant refresh, got %d. body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Successful refresh: missing_tactical -> matched; tactical_agent_id
+	// filled; the already-stored glpi_computer_id is preserved (re-supplied
+	// by the live GLPI lookup, not read back from the old row).
+	setup.mockTactical.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		if strings.EqualFold(hostname, "RICARDOSMS") {
+			return tactical.Agent{AgentID: "tac-refresh-1", Hostname: "RICARDOSMS"}, nil
+		}
+		return tactical.Agent{}, errors.New("not found")
+	}
+	setup.mockGLPI.findComputerFn = func(ctx context.Context, hostname string) (glpi.Computer, error) {
+		if strings.EqualFold(hostname, "RICARDOSMS") {
+			return glpi.Computer{ID: "59", Name: "RICARDOSMS"}, nil
+		}
+		return glpi.Computer{}, glpi.ErrNotFound
+	}
+	rec = doRequest(h, "POST", "/api/support/devices/"+b1.ID+"/refresh", setup.admin1Token, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin refresh, got %d. body: %s", rec.Code, rec.Body.String())
+	}
+	var refreshResp struct {
+		Device DeviceBindingPublicDTO `json:"device"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &refreshResp)
+	if refreshResp.Device.MatchStatus != "matched" {
+		t.Fatalf("expected matched after refresh, got %+v", refreshResp.Device)
+	}
+	if refreshResp.Device.TacticalAgentID != "tac-refresh-1" {
+		t.Fatalf("expected tactical_agent_id populated, got %+v", refreshResp.Device)
+	}
+	if refreshResp.Device.GLPIComputerID != "59" {
+		t.Fatalf("expected glpi_computer_id preserved, got %+v", refreshResp.Device)
+	}
+
+	// Idempotent: a second refresh must not create another binding row.
+	rec = doRequest(h, "POST", "/api/support/devices/"+b1.ID+"/refresh", setup.admin1Token, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on second refresh, got %d", rec.Code)
+	}
+	all, err := setup.bStore.Search(ctx, setup.user1ID, "RICARDOSMS")
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 binding for RICARDOSMS after two refreshes, got %d", len(all))
+	}
+
+	// A failing Tactical lookup must not erase the previously valid
+	// tactical_agent_id (Upsert only overwrites a non-empty field).
+	setup.mockTactical.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		return tactical.Agent{}, errors.New("tactical unavailable")
+	}
+	rec = doRequest(h, "POST", "/api/support/devices/"+b1.ID+"/refresh", setup.admin1Token, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when tactical lookup fails, got %d", rec.Code)
+	}
+	afterTacticalFailure, err := setup.bStore.GetForTenant(ctx, setup.user1ID, b1.ID)
+	if err != nil {
+		t.Fatalf("GetForTenant failed: %v", err)
+	}
+	if afterTacticalFailure.TacticalAgentID != "tac-refresh-1" {
+		t.Fatalf("expected tactical_agent_id preserved despite tactical error, got %+v", afterTacticalFailure)
+	}
+	if afterTacticalFailure.GLPIComputerID != "59" {
+		t.Fatalf("expected glpi_computer_id preserved, got %+v", afterTacticalFailure)
+	}
+
+	// A failing GLPI lookup must not erase the previously valid
+	// glpi_computer_id either.
+	setup.mockTactical.findAgentFn = func(ctx context.Context, hostname string) (tactical.Agent, error) {
+		return tactical.Agent{AgentID: "tac-refresh-1", Hostname: "RICARDOSMS"}, nil
+	}
+	setup.mockGLPI.findComputerFn = func(ctx context.Context, hostname string) (glpi.Computer, error) {
+		return glpi.Computer{}, errors.New("glpi unavailable")
+	}
+	rec = doRequest(h, "POST", "/api/support/devices/"+b1.ID+"/refresh", setup.admin1Token, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when glpi lookup fails, got %d", rec.Code)
+	}
+	afterGLPIFailure, err := setup.bStore.GetForTenant(ctx, setup.user1ID, b1.ID)
+	if err != nil {
+		t.Fatalf("GetForTenant failed: %v", err)
+	}
+	if afterGLPIFailure.GLPIComputerID != "59" {
+		t.Fatalf("expected glpi_computer_id preserved despite glpi error, got %+v", afterGLPIFailure)
+	}
+	if afterGLPIFailure.TacticalAgentID != "tac-refresh-1" {
+		t.Fatalf("expected tactical_agent_id preserved, got %+v", afterGLPIFailure)
+	}
+
+	// No external write surface is ever touched by refresh: GLPI ticket
+	// creation/lookup is never called (Tactical exposes no write operation
+	// at all in this client).
+	if len(setup.mockGLPI.createTicketCalls) != 0 {
+		t.Fatalf("expected 0 GLPI CreateTicket calls from refresh, got %d", len(setup.mockGLPI.createTicketCalls))
+	}
+	if len(setup.mockGLPI.getTicketCalls) != 0 {
+		t.Fatalf("expected 0 GLPI GetTicket calls from refresh, got %d", len(setup.mockGLPI.getTicketCalls))
 	}
 }
 

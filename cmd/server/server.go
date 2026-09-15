@@ -274,7 +274,7 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, supC
 			tacticalCli = tc
 		}
 
-		supSvc = NewSupportService(sStore, deviceBindings, glpiCli, tacticalCli)
+		supSvc = NewSupportService(sStore, deviceBindings, glpiCli, tacticalCli, log)
 
 		// Synchronous orphan recovery on startup (single-instance invariant)
 		orphanAge := time.Duration(supCfg.CreateTimeoutSeconds+supCfg.RecoveryMarginSeconds) * time.Second

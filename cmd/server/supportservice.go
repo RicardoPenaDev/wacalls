@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ type SupportService struct {
 	glpi     supportGLPIClient
 	tactical supportTacticalClient
 	now      func() time.Time
+	log      *slog.Logger
 }
 
 // NewSupportService constructs a new SupportService.
@@ -27,13 +29,18 @@ func NewSupportService(
 	bindings deviceBindingStoreBackend,
 	glpiClient supportGLPIClient,
 	tacticalClient supportTacticalClient,
+	log *slog.Logger,
 ) *SupportService {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &SupportService{
 		store:    store,
 		bindings: bindings,
 		glpi:     glpiClient,
 		tactical: tacticalClient,
 		now:      time.Now,
+		log:      log,
 	}
 }
 
@@ -84,6 +91,13 @@ type ServiceUpdateDeviceInput struct {
 	TenantID        string
 	DeviceBindingID string
 	ActorUserID     string
+}
+
+// ServiceRefreshDeviceInput specifies parameters for an administrative,
+// read-only re-resolution of an existing device binding's GLPI/Tactical ids.
+type ServiceRefreshDeviceInput struct {
+	ID       string
+	TenantID string
 }
 
 // CreateTicket executes the atomic creation, equipment resolution, GLPI ticket creation
@@ -242,10 +256,15 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 			var foundTactical bool
 			var foundGLPI bool
 			var glpiCompID string
+			var tacticalAgentID string
 
 			if s.tactical != nil {
-				if _, tacErr := s.tactical.FindAgentByHostname(ctx, normHost); tacErr == nil {
+				if agent, tacErr := s.tactical.FindAgentByHostname(ctx, normHost); tacErr == nil {
 					foundTactical = true
+					tacticalAgentID = agent.AgentID
+					if !agent.LastSeenValid {
+						s.log.Warn("support: tactical agent located with unparseable last_seen, ignoring stale telemetry", "tenant", in.TenantID)
+					}
 				}
 			}
 			if s.glpi != nil {
@@ -257,17 +276,7 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 			}
 
 			// Apply equipment matrix and update local device_bindings
-			var matchStatus string
-			switch {
-			case foundTactical && foundGLPI:
-				matchStatus = "matched"
-			case foundTactical && !foundGLPI:
-				matchStatus = "missing_glpi"
-			case !foundTactical && foundGLPI:
-				matchStatus = "missing_tactical"
-			default:
-				matchStatus = "unmatched"
-			}
+			matchStatus := equipmentMatchStatus(foundTactical, foundGLPI)
 
 			if foundTactical || foundGLPI {
 				_, _ = s.bindings.Upsert(ctx, DeviceBinding{
@@ -276,6 +285,7 @@ func (s *SupportService) CreateTicket(ctx context.Context, in ServiceCreateTicke
 					Hostname:           resolvedHostInformed,
 					HostnameNormalized: normHost,
 					GLPIComputerID:     glpiCompID,
+					TacticalAgentID:    tacticalAgentID,
 					MatchStatus:        matchStatus,
 					LastVerifiedAt:     s.now().UTC().Unix(),
 				})
@@ -580,4 +590,82 @@ func toIDReference(id *string) *glpi.IDReference {
 		return nil
 	}
 	return &glpi.IDReference{ID: n}
+}
+
+// equipmentMatchStatus applies the T-004 equipment matrix: it is the single
+// source of truth for device_bindings.match_status, shared by CreateTicket's
+// best-effort resolution and RefreshDeviceBinding's explicit re-resolution.
+func equipmentMatchStatus(foundTactical, foundGLPI bool) string {
+	switch {
+	case foundTactical && foundGLPI:
+		return "matched"
+	case foundTactical && !foundGLPI:
+		return "missing_glpi"
+	case !foundTactical && foundGLPI:
+		return "missing_tactical"
+	default:
+		return "unmatched"
+	}
+}
+
+// RefreshDeviceBinding re-runs read-only GLPI/Tactical hostname lookups for
+// an existing device binding (T-007 7.4-R1) and merges any newly confirmed
+// identifiers. The hostname is always the one already persisted on the
+// binding — callers must not accept an arbitrary hostname from a request
+// body. It issues no writes to GLPI or Tactical.
+//
+// Upsert only overwrites glpi_computer_id/tactical_agent_id when the new
+// value is non-empty (see devicebindingstore.go), so a lookup that errors or
+// finds nothing this round leaves the previously stored identifier exactly
+// as it was — it is never blanked out. match_status is recomputed
+// deterministically from this call's findings alone.
+func (s *SupportService) RefreshDeviceBinding(ctx context.Context, in ServiceRefreshDeviceInput) (DeviceBinding, error) {
+	existing, err := s.bindings.GetForTenant(ctx, in.TenantID, in.ID)
+	if err != nil {
+		return DeviceBinding{}, err
+	}
+
+	normHost := normalizeHostname(existing.Hostname)
+	if normHost == "" {
+		return DeviceBinding{}, ErrInvalidHostname
+	}
+
+	var foundTactical, foundGLPI bool
+	var tacticalAgentID, glpiCompID string
+
+	if s.tactical != nil {
+		if agent, tacErr := s.tactical.FindAgentByHostname(ctx, normHost); tacErr == nil {
+			foundTactical = true
+			tacticalAgentID = agent.AgentID
+			if !agent.LastSeenValid {
+				s.log.Warn("support: device refresh located tactical agent with unparseable last_seen, ignoring stale telemetry", "tenant", in.TenantID, "bindingId", existing.ID)
+			}
+		}
+	}
+	if s.glpi != nil {
+		if comp, glpiErr := s.glpi.FindComputerByHostname(ctx, normHost); glpiErr == nil && comp.ID != "" {
+			foundGLPI = true
+			glpiCompID = comp.ID
+		}
+	}
+
+	updated, err := s.bindings.Upsert(ctx, DeviceBinding{
+		ID:                 existing.ID,
+		OwnerID:            existing.OwnerID,
+		TenantID:           existing.TenantID,
+		Hostname:           existing.Hostname,
+		HostnameNormalized: normHost,
+		GLPIComputerID:     glpiCompID,
+		TacticalAgentID:    tacticalAgentID,
+		TacticalClientID:   existing.TacticalClientID,
+		TacticalSiteID:     existing.TacticalSiteID,
+		SectorCode:         existing.SectorCode,
+		Patrimonio:         existing.Patrimonio,
+		MatchStatus:        equipmentMatchStatus(foundTactical, foundGLPI),
+		LastVerifiedAt:     s.now().UTC().Unix(),
+	})
+	if err != nil {
+		return DeviceBinding{}, err
+	}
+	return updated, nil
 }
